@@ -28,11 +28,18 @@ import random
 import sys
 import time
 import threading
+import multiprocessing as mp
+import queue
+import resource
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, List
 from contextlib import contextmanager
 
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from google.protobuf import text_format
@@ -61,6 +68,8 @@ from dblib import chronos as chronos_mod
 from dblib.xata import XataToolSuite
 from dblib import terminusdb
 from dblib.terminusdb import TerminusDBToolSuite
+from dblib import neon_local
+from dblib.neon_local import NeonLocalToolSuite
 from dblib.db_api import DBToolSuite, Ref
 from dblib import result_collector as rc
 
@@ -73,6 +82,7 @@ from microbench.operations import (
     DeleteOperation,
     RangeReadOperation,
     RangeUpdateOperation,
+    MixedOperation,
     BranchCreateOperation,
     BranchConnectOperation,
     BranchDeleteOperation,
@@ -194,6 +204,19 @@ class BenchmarkConfig:
                         "neon_project_id required when reusing existing Neon database"
                     )
 
+        # Worker processes get the backend info by pickling; the file_copy,
+        # chronos and terminusdb infos hold locks or clients that do not pickle.
+        if self._proto.num_processes > 1 and self._proto.backend in (
+                tp.Backend.FILE_COPY, tp.Backend.CHRONOS, tp.Backend.TERMINUSDB):
+            raise ValueError("num_processes > 1 is not supported on this backend")
+
+        # A seed database to copy from needs the Dolt revision-database naming.
+        if (self.source == "generated" and self.generated.seed_db
+                and self._proto.backend not in (tp.Backend.DOLT, tp.Backend.DOLT_MYSQL,
+                                                tp.Backend.NEON_LOCAL)):
+            raise ValueError("database_setup.generated.seed_db is supported on DOLT, DOLT_MYSQL "
+                             "and NEON_LOCAL only")
+
         # Validate operation is registered
         op_type = op_bench.operation
         if not OperationRegistry.is_registered(op_type):
@@ -236,6 +259,21 @@ class BenchmarkConfig:
         return max(1, self._proto.concurrent_requests)
 
     @property
+    def background_workers(self) -> int:
+        """Background clients: one per setup branch when background_load is set."""
+        return self.num_branches if self._proto.background_load else 0
+
+    @property
+    def background_operation(self) -> tp.OperationType:
+        return self._proto.background_operation
+
+    @property
+    def num_processes(self) -> int:
+        """Client processes the worker threads (measured and background) are
+        spread over (1 = this process)."""
+        return max(1, min(self._proto.num_processes, self.num_threads + self.background_workers))
+
+    @property
     def use_async(self) -> bool:
         """Whether to run the async runner (use_async or concurrent_requests > 1)."""
         return self._proto.use_async or self.concurrent_requests > 1
@@ -251,6 +289,15 @@ class BenchmarkConfig:
     @property
     def cleanup(self) -> bool:
         return self._proto.database_setup.cleanup
+
+    @property
+    def source(self) -> Optional[str]:
+        """Which database_setup source is set: existing_db, sql_dump, generated or None."""
+        return self._proto.database_setup.WhichOneof("source")
+
+    @property
+    def generated(self) -> tp.GeneratedData:
+        return self._proto.database_setup.generated
 
     @property
     def operation_type(self) -> tp.OperationType:
@@ -378,6 +425,10 @@ def create_db_tools(
         )
     if backend == tp.Backend.TERMINUSDB:
         return TerminusDBToolSuite.init_for_bench(
+            result_collector, db_name, default_branch, measure_storage
+        )
+    if backend == tp.Backend.NEON_LOCAL:
+        return NeonLocalToolSuite.init_for_bench(
             result_collector, db_name, default_branch, measure_storage
         )
     if backend == tp.Backend.NEON:
@@ -536,6 +587,11 @@ class BackendManager:
                         info.default_branch_id = branch["id"]
                         break
 
+        elif backend == tp.Backend.NEON_LOCAL:
+            # The run root ("main") is a timeline branched off the seed
+            # timeline, which already holds the data (see dblib/neon_local.py).
+            info.default_branch_name = neon_local.MAIN_BRANCH
+
         elif backend == tp.Backend.XATA:
             if require_db_setup:
                 (
@@ -569,6 +625,8 @@ class BackendManager:
             terminusdb.setup_database(db_name, sql_dump_path)
         elif require_db_setup and backend == tp.Backend.BAUPLAN:
             bauplan.setup_database(db_name, sql_dump_path)
+        elif require_db_setup and backend == tp.Backend.NEON_LOCAL:
+            neon_local.setup_run(db_name)
         elif require_db_setup:
             self._create_database(info.default_uri, db_name)
 
@@ -621,6 +679,12 @@ class BackendManager:
                 matrixone.drop_database(db_name)
             except Exception as e:
                 print(f"Error deleting database: {e}")
+        elif self.config.backend == tp.Backend.NEON_LOCAL and db_name:
+            try:
+                # Every compute and every timeline but the seed.
+                neon_local.teardown_run(db_name)
+            except Exception as e:
+                print(f"Error cleaning up neon_local: {e}")
         elif self.config.backend == tp.Backend.BAUPLAN and db_name:
             try:
                 # The run's branches, tags and S3 files.
@@ -697,6 +761,130 @@ class BackendManager:
             )
         else:
             raise ValueError(f"Unsupported backend: {tp.Backend.Name(backend)}")
+
+
+# ============================================================================
+# Generated data (the microbench counterpart of the macrobench "generated"
+# source): CH-benCHmark seeded in the server, foreign keys skipped, committed
+# as the base. BackendManager.setup() only creates the empty database, as it
+# does for the macrobench runner and the verbs driver, which seed themselves;
+# runner2.main() calls seed_generated_database() right after it.
+# ============================================================================
+
+
+def _generated_schema(gen: tp.GeneratedData, scale_factor: int = 1):
+    from macrobench import task_pb2 as mtp
+
+    return mtp.SchemaConfig(
+        base=mtp.BaseSchema.CH_BENCH,
+        scale_factor=gen.scale_factor or scale_factor or 1,
+        skip_foreign_keys=True,
+        seed_batch_rows=gen.seed_batch_rows or 500,
+    )
+
+
+def _seed_table_ref(backend: int, seed_db: str, table: str) -> str:
+    """``table`` on the main branch of ``seed_db``, named the way the Dolt
+    adapters address another database's branch (see ``_qualified_table`` in
+    dblib/dolt.py and dblib/dolt_mysql.py)."""
+    if backend == tp.Backend.DOLT:
+        return f'"{seed_db}/main".public.{table}'
+    if backend == tp.Backend.DOLT_MYSQL:
+        return f"`{seed_db}/main`.`{table}`"
+    raise ValueError(f"seed_db copy is not supported on {tp.Backend.Name(backend)}")
+
+
+def _copy_from_seed_db(suite, backend: int, seed_db: str, ref: str, log=print) -> dict:
+    """Copy every CH table from ``seed_db`` into the suite's database on
+    ``ref`` with server-side INSERT ... SELECT (untimed). Returns {table: rows}."""
+    from macrobench.schema import CH_TABLES
+
+    counts = {}
+
+    def script(db):
+        for table in CH_TABLES:
+            db.sql(f"INSERT INTO {table} SELECT * FROM {_seed_table_ref(backend, seed_db, table)}")
+            counts[table] = db.sql(f"SELECT count(*) FROM {table}")[0][0]
+            log(f"  copied {table:>12}: {counts[table]:>9,} rows")
+
+    suite.exec(script, refs=[ref], timed=False)[0].raise_for_status()
+    return counts
+
+
+def _database_exists(backend: int, backend_info: BackendInfo, db_name: str) -> bool:
+    """Whether the driver can open ``db_name`` on the server."""
+    try:
+        suite = create_db_tools(backend, backend_info, db_name, rc.ResultCollector())
+    except Exception:
+        return False
+    suite.close_connection()
+    return True
+
+
+def seed_generated_database(backend: int, backend_info: BackendInfo, db_name: str,
+                            gen: tp.GeneratedData, scale_factor: int = 1,
+                            log=print, schema=None) -> dict:
+    """Seed the root branch of the (empty) ``db_name`` with generated
+    CH-benCHmark data and commit it as "base". With ``gen.seed_db`` set, the
+    tables are copied server-side from that database, which is generated once
+    on first use and never dropped. Returns what the summary records."""
+    from macrobench import schema as mschema
+    from macrobench.datagen.ch import CHScale, seed_ch
+
+    schema = schema or _generated_schema(gen, scale_factor)
+    root = backend_info.root_branch_name or backend_info.default_branch_name
+    t0 = time.time()
+    if backend == tp.Backend.NEON_LOCAL and gen.seed_db:
+        # The run root is a branch of the seed timeline: the data is there.
+        log(f"NEON_LOCAL: run root branched from the seed timeline ({gen.seed_db}); nothing to copy")
+        return {"source": "generated", "scale_factor": schema.scale_factor, "rows": {},
+                "seed_db": gen.seed_db, "seed_db_created": False, "seed_sec": 0.0}
+    seeded_now = False
+    if gen.seed_db:
+        seeded_now = ensure_seed_database(backend, gen, scale_factor, log=log, schema=schema)
+    suite = create_db_tools(backend, backend_info, db_name, rc.ResultCollector())
+    try:
+        sch = mschema.apply_schema(suite, root, schema, "microbench", log=log)
+        if sch["failed"]:
+            raise RuntimeError(f"schema statement failed: {sch['failed'][0]}")
+        if gen.seed_db:
+            log(f"Copying CH-benCHmark tables from {gen.seed_db}...")
+            counts = _copy_from_seed_db(suite, backend, gen.seed_db, root, log=log)
+        else:
+            scale = CHScale.from_config(schema)
+            log(f"Seeding CH-benCHmark at W={scale.warehouses}...")
+            counts = seed_ch(suite, root, scale, seed=gen.seed or 42,
+                             batch_rows=schema.seed_batch_rows or 500, log=log)
+        suite.commit(root, "base", timed=False, raise_on_error=True)
+    finally:
+        suite.close_connection()
+    stats = {
+        "source": "generated",
+        "scale_factor": schema.scale_factor,
+        "rows": counts,
+        "seed_db": gen.seed_db or None,
+        "seed_db_created": seeded_now,
+        "seed_sec": round(time.time() - t0, 1),
+    }
+    log(f"Data ready: {sum(counts.values()):,} rows in {stats['seed_sec']}s")
+    return stats
+
+
+def ensure_seed_database(backend: int, gen: tp.GeneratedData, scale_factor: int = 1,
+                         log=print, schema=None) -> bool:
+    """Create and generate ``gen.seed_db`` unless it exists. Returns True if
+    it was generated now."""
+    probe_info = BackendInfo(default_branch_name="main", root_branch_name="main")
+    if _database_exists(backend, probe_info, gen.seed_db):
+        return False
+    log(f"Seed database {gen.seed_db} not found; generating it once...")
+    setup = tp.DatabaseSetup(db_name=gen.seed_db, cleanup=False)
+    setup.generated.CopyFrom(gen)
+    setup.generated.seed_db = ""
+    info = BackendManager(BackendSetup(backend, setup)).setup()
+    seed_generated_database(backend, info, gen.seed_db, setup.generated, scale_factor,
+                            log=log, schema=schema)
+    return True
 
 
 # ============================================================================
@@ -854,6 +1042,11 @@ class SetupPhase:
             ctx, benchmark_table, inserts, updates, deletes
         )
 
+        parallelism = self.config.setup_config.setup_parallelism
+        if parallelism > 1 and shape == tp.BranchShape.FAN_OUT and num_branches > 1:
+            return self._parallel_fan_out(ctx, table_schema, benchmark_table, num_branches,
+                                          parallelism, inserts, updates, deletes)
+
         # Create branches with progress bar. Branch creation is timed into
         # the setup collector; the data ops on each branch are not.
         for i in tqdm(range(num_branches), desc="Creating branches"):
@@ -866,10 +1059,14 @@ class SetupPhase:
             else:  # BUSHY
                 parent = ctx.rnd.choice(branches)  # Random parent
 
+            # The timed BRANCH row carries the branches existing before the
+            # create, the CONNECT row the count after it.
+            ctx.record_branch_count(i)
             ctx.db_tools.branch(
                 branch_name, from_ref=parent,
                 storage=self.config.measure_storage,
             ).raise_for_status()
+            ctx.record_branch_count(i + 1)
             ctx.connect(branch_name)
             current_parent = branch_name
             branches.append(branch_name)
@@ -884,6 +1081,53 @@ class SetupPhase:
 
         last_branch_name = ctx.current_branch
         return last_branch_name, last_branch_name
+
+    def _parallel_fan_out(self, ctx: 'WorkerContext', table_schema, table: str, num_branches: int,
+                          parallelism: int, inserts: int, updates: int, deletes: int) -> Tuple[str, str]:
+        """FAN_OUT setup with ``parallelism`` setup workers, each with its own
+        suite: create setup_branch_i from the root, connect to it (timed, as in
+        the serial path) and run its untimed data operations. Branches are
+        registered in index order afterwards, so the result matches the
+        serial path's."""
+        root = ctx.current_branch or self.backend_info.default_branch_name
+        work = queue.Queue()
+        for i in range(num_branches):
+            work.put(i)
+        bar = tqdm(total=num_branches, desc=f"Creating branches ({parallelism} at a time)")
+        bar_lock = threading.Lock()
+
+        def worker(k: int) -> None:
+            wctx = WorkerContext(
+                config=self.config, backend_info=self.backend_info, thread_id=k + 1, seed=42 + k,
+                result_collector=ctx.result_collector, branch_manager=SharedBranchManager(),
+                shared_progress=None, assigned_branches=[],
+            )
+            with wctx:
+                wctx._table_datagen = DynamicDataGenerator(table_schema)
+                wctx._pk_columns = ctx._pk_columns
+                while True:
+                    try:
+                        i = work.get_nowait()
+                    except queue.Empty:
+                        return
+                    name = f"setup_branch_{i + 1}"
+                    wctx.record_branch_count(i)
+                    wctx.db_tools.branch(name, from_ref=root,
+                                         storage=self.config.measure_storage).raise_for_status()
+                    wctx.record_branch_count(i + 1)
+                    wctx.connect(name)
+                    self._perform_branch_data_ops(wctx, table, inserts, updates, deletes)
+                    with bar_lock:
+                        bar.update(1)
+
+        with ThreadPoolExecutor(parallelism) as ex:
+            for f in [ex.submit(worker, k) for k in range(min(parallelism, num_branches))]:
+                f.result()
+        bar.close()
+        for i in range(num_branches):
+            ctx.add_branch(f"setup_branch_{i + 1}")
+        last = f"setup_branch_{num_branches}"
+        return last, last
 
     def _perform_branch_data_ops(
         self,
@@ -958,6 +1202,30 @@ class SharedBranchManager:
             return len(self._branches)
 
 
+# Table metadata (key columns, all columns, schema, existing keys) looked up
+# once per client process and shared by its worker threads. Each lookup is an
+# information_schema query (tens of ms on the Dolt servers) or a full key
+# scan; done per thread or per operation it adds server load and, in async
+# mode, blocks the worker's event loop. Keyed by (backend, database, kind,
+# table); a runner process serves one run, so entries never go stale.
+_META_CACHE: Dict[tuple, list] = {}
+_META_LOCK = threading.Lock()
+_MISSING = object()
+
+
+def _cached_meta(key: tuple, compute):
+    """Value for ``key``, computed once per process even under concurrent callers."""
+    with _META_LOCK:
+        entry = _META_CACHE.get(key)
+        if entry is None:
+            entry = _META_CACHE[key] = [threading.Lock(), _MISSING]
+    if entry[1] is _MISSING:
+        with entry[0]:
+            if entry[1] is _MISSING:
+                entry[1] = compute()
+    return entry[1]
+
+
 class SharedProgress:
     """Thread-safe shared progress bar."""
 
@@ -998,11 +1266,19 @@ class TimedPhase:
         self.start_time: Optional[float] = None
         self._end_times: List[float] = []
         self._lock = threading.Lock()
+        self._num_workers = num_workers
         self._barrier = threading.Barrier(num_workers, action=self._mark_start)
+        # CPU seconds of the server process (when co-located) and of this
+        # client process, sampled at both ends of the timed window.
+        self._server_cpu = [None, None]
+        self._client_cpu = [None, None]
+        self.background: Optional["BackgroundControl"] = None   # stopped at the last finish
 
     def _mark_start(self) -> None:
         # Runs once, in the last worker to arrive, before any are released.
         self.start_time = time.time()
+        self._server_cpu[0] = server_cpu_seconds()
+        self._client_cpu[0] = self_cpu_seconds()
 
     def wait(self) -> None:
         self._barrier.wait()
@@ -1014,15 +1290,232 @@ class TimedPhase:
         fail instead of waiting forever.
         """
         self._barrier.abort()
+        if self.background is not None:
+            self.background.stop()
 
     def finish(self) -> None:
         with self._lock:
             self._end_times.append(time.time())
+            if len(self._end_times) == self._num_workers:
+                self._server_cpu[1] = server_cpu_seconds()
+                self._client_cpu[1] = self_cpu_seconds()
+                if self.background is not None:
+                    self.background.stop()
 
     @property
     def end_time(self) -> Optional[float]:
         with self._lock:
             return max(self._end_times) if self._end_times else None
+
+    def cpu_usage(self) -> dict:
+        """CPU seconds used in the timed window by the server process (None
+        unless DBFORK_SERVER_PID names a local process) and the client."""
+        return {"server_cpu_seconds": _delta(self._server_cpu),
+                "client_cpu_seconds": _delta(self._client_cpu)}
+
+
+class RemoteCpuSampler:
+    """CPU (and disk) use of remote server machines over the timed window.
+
+    DBFORK_REMOTE_CPU="label=http://host:port/cpu?proc=a,b&disk=sdc;label2=..."
+    names HTTP endpoints that return cumulative counters as JSON
+    ({"proc_s", "node_busy_s", "node_iowait_s", "ncpu", "disk_busy_s"?}; see
+    experiment/3-neon-branch-scaling/scripts/neon_node_agent.py). A thread
+    samples every endpoint every ``period`` seconds for the whole run; the
+    counters are interpolated at the window's ends, so the timed path never
+    waits on the network.
+    """
+
+    FIELDS = ("proc_s", "node_busy_s", "node_iowait_s", "disk_busy_s", "disk_reads", "disk_writes",
+              "disk_read_bytes", "disk_write_bytes")
+
+    def __init__(self, period: float = 1.0):
+        spec = os.environ.get("DBFORK_REMOTE_CPU", "")
+        self.targets = []
+        for item in filter(None, (x.strip() for x in spec.split(";"))):
+            label, url = item.split("=", 1)
+            self.targets.append((label.strip(), url.strip()))
+        self.period = period
+        self.samples: Dict[str, list] = {label: [] for label, _ in self.targets}
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _fetch(self, label: str, url: str) -> None:
+        import urllib.request
+        try:
+            t0 = time.time()
+            with urllib.request.urlopen(url, timeout=5) as r:
+                data = json.loads(r.read())
+            data["_t"] = (t0 + time.time()) / 2
+            self.samples[label].append(data)
+        except Exception:
+            pass
+
+    def _loop(self) -> None:
+        while True:
+            threads = [threading.Thread(target=self._fetch, args=t, daemon=True) for t in self.targets]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(6)
+            if self._stop.wait(self.period):
+                break
+
+    def start(self) -> "RemoteCpuSampler":
+        if self.targets:
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        if self._thread:
+            self._stop.set()
+            self._thread.join(10)
+
+    @staticmethod
+    def _at(samples: list, field: str, t: float) -> Optional[float]:
+        pts = [(x["_t"], x[field]) for x in samples if field in x]
+        if len(pts) < 2 or t < pts[0][0] - 2 or t > pts[-1][0] + 2:
+            return None
+        for (ta, va), (tb, vb) in zip(pts, pts[1:]):
+            if t <= tb or (ta, va) == pts[-2]:
+                if tb == ta:
+                    return vb
+                return va + (vb - va) * (t - ta) / (tb - ta)
+        return None
+
+    def usage(self, start: float, end: float) -> Optional[dict]:
+        """{label: {proc_cores, node_cores, node_iowait_cores, disk_util, ncpu}}
+        averaged over [start, end]."""
+        if not self.targets or end <= start:
+            return None
+        out = {}
+        names = {"proc_s": "proc_cores", "node_busy_s": "node_cores",
+                 "node_iowait_s": "node_iowait_cores", "disk_busy_s": "disk_util",
+                 "disk_reads": "disk_reads_per_s", "disk_writes": "disk_writes_per_s",
+                 "disk_read_bytes": "disk_read_bytes_per_s", "disk_write_bytes": "disk_write_bytes_per_s"}
+        for label, samples in self.samples.items():
+            row = {"ncpu": samples[-1].get("ncpu") if samples else None, "samples": len(samples)}
+            for f in self.FIELDS:
+                a, b = self._at(samples, f, start), self._at(samples, f, end)
+                row[names[f]] = (b - a) / (end - start) if a is not None and b is not None else None
+            out[label] = row
+        return out
+
+
+def server_cpu_seconds() -> Optional[float]:
+    """utime + stime of the process DBFORK_SERVER_PID names (a server on
+    this machine), or None."""
+    pid = os.environ.get("DBFORK_SERVER_PID", "")
+    if not pid.isdigit():
+        return None
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read().rsplit(")", 1)[1].split()
+        # After the comm field: utime and stime are fields 14 and 15 overall.
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def self_cpu_seconds() -> float:
+    """CPU seconds (user + system) used by this process so far."""
+    ru = resource.getrusage(resource.RUSAGE_SELF)
+    return ru.ru_utime + ru.ru_stime
+
+
+def _delta(pair) -> Optional[float]:
+    return None if pair[0] is None or pair[1] is None else pair[1] - pair[0]
+
+
+class BackgroundControl:
+    """Coordinates background clients (background_load): measured workers
+    wait until every background client is running, and the timed phase stops
+    them when its last measured worker finishes. Built from threading
+    primitives (one process) or multiprocessing ones (client processes);
+    ``expected`` is the number of background clients."""
+
+    def __init__(self, expected: int, ctx=None):
+        self.expected = expected
+        if ctx is None:
+            self._stop = threading.Event()
+            self._lock = threading.Lock()
+            self._started = SimpleNamespace(value=0)
+        else:
+            self._stop = ctx.Event()
+            self._lock = ctx.Lock()
+            self._started = ctx.Value("i", 0, lock=False)
+
+    def started(self) -> None:
+        with self._lock:
+            self._started.value += 1
+
+    # Seconds the background load runs on its own before measuring starts.
+    SETTLE_SEC = 1.0
+
+    def wait_started(self, timeout: float = 600.0) -> None:
+        """Block until every background client runs (or stop/timeout), then
+        let the load settle for SETTLE_SEC."""
+        deadline = time.time() + timeout
+        while self._started.value < self.expected and not self._stop.is_set():
+            if time.time() > deadline:
+                raise RuntimeError(f"only {self._started.value}/{self.expected} background clients started")
+            time.sleep(0.05)
+        time.sleep(self.SETTLE_SEC)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def stopped(self) -> bool:
+        return self._stop.is_set()
+
+
+class ProcessTimedPhase:
+    """TimedPhase shared by the worker threads of several client processes
+    (num_processes > 1): one multiprocessing barrier over every thread, and
+    the window start/end and server CPU kept in shared memory. Each process
+    also measures its own CPU over the window."""
+
+    def __init__(self, shared, local_workers: int, background: Optional["BackgroundControl"] = None):
+        # shared = (barrier, times[start, end, server_cpu0, server_cpu1], done, lock, total_workers)
+        self._barrier, self._times, self._done, self._lock, self._total = shared
+        self.background = background
+        self._local_workers = local_workers
+        self._local_lock = threading.Lock()
+        self._local_done = 0
+        self._client_cpu = [None, None]
+
+    def wait(self) -> None:
+        if self._barrier.wait() == 0:
+            with self._lock:
+                self._times[0] = time.time()
+                cpu = server_cpu_seconds()
+                self._times[2] = -1.0 if cpu is None else cpu
+        with self._local_lock:
+            if self._client_cpu[0] is None:
+                self._client_cpu[0] = self_cpu_seconds()
+
+    def abort(self) -> None:
+        self._barrier.abort()
+        if self.background is not None:
+            self.background.stop()
+
+    def finish(self) -> None:
+        with self._lock:
+            self._done.value += 1
+            if self._done.value == self._total:
+                self._times[1] = time.time()
+                cpu = server_cpu_seconds()
+                self._times[3] = -1.0 if cpu is None else cpu
+                if self.background is not None:
+                    self.background.stop()
+        with self._local_lock:
+            self._local_done += 1
+            if self._local_done == self._local_workers:
+                self._client_cpu[1] = self_cpu_seconds()
+
+    def client_cpu_seconds(self) -> Optional[float]:
+        return _delta(self._client_cpu)
 
 
 class WorkerContext:
@@ -1063,6 +1556,7 @@ class WorkerContext:
         # Data generation and caching
         self._table_datagen: Optional[DynamicDataGenerator] = None
         self._pk_columns: List[str] = []
+        self._columns: Dict[str, List[str]] = {}  # table -> column names (setup helpers)
         self._existing_pks: List[Tuple] = []
         self._modified_keys: Dict[str, List[Tuple]] = {}
 
@@ -1086,6 +1580,9 @@ class WorkerContext:
             config.backend, backend_info, config.db_name, result_collector,
             measure_storage=self.measure_storage,
         )
+
+        # Every row of the main phase carries the number of setup branches.
+        self.record_branch_count(config.num_branches)
 
         # Add root branch to manager (except FILE_COPY)
         if config.backend != tp.Backend.FILE_COPY:
@@ -1168,26 +1665,51 @@ class WorkerContext:
         res[0].raise_for_status()
         return res[0]
 
+    def _meta_key(self, kind: str, table_name: str) -> tuple:
+        return (self.config.backend, self.config.db_name, kind, table_name)
+
     def get_pk_columns(self, table_name: str) -> List[str]:
-        """Get primary key column names for a table."""
+        """Get primary key column names for a table (once per process)."""
         if not self._pk_columns:
-            self._pk_columns = dbh.get_pk_column_names(
-                self.db_tools.get_current_connection(), table_name
+            self._pk_columns = _cached_meta(
+                self._meta_key("pk_columns", table_name),
+                lambda: dbh.get_pk_column_names(self.db_tools.get_current_connection(), table_name),
             )
         return self._pk_columns
+
+    def get_pk_values(self, table_name: str) -> list:
+        """Primary keys of ``table_name`` as first read, shared by the
+        process's workers (a read-only list; operations keep their own
+        modified keys per branch)."""
+        if not self._existing_pks:
+            pk_columns = self.get_pk_columns(table_name)
+            self._existing_pks = _cached_meta(
+                self._meta_key("pk_values", table_name),
+                lambda: dbh.get_pk_values(self.db_tools.get_current_connection(), table_name, pk_columns),
+            )
+        return self._existing_pks
+
+    def initial_db_size(self) -> int:
+        """Database size at the start of the run (once per process; 0 if unknown)."""
+        def size():
+            try:
+                return dbh.get_db_size(self.db_tools.get_current_connection())
+            except Exception:
+                return 0
+        return _cached_meta(self._meta_key("db_size", ""), size)
+
+    def get_table_schema(self, table_name: str) -> str:
+        """CREATE TABLE text of ``table_name`` (once per process)."""
+        return _cached_meta(self._meta_key("schema", table_name),
+                            lambda: self.db_tools.get_table_schema(table_name))
 
     def select_random_key(self, table_name: str) -> Optional[Tuple]:
         """Select a random primary key from the table."""
         cur_branch_id = self.current_branch
 
         pk_columns = self.get_pk_columns(table_name)
-        existing_pks = self._existing_pks or dbh.get_pk_values(
-            self.db_tools.get_current_connection(), table_name, pk_columns
-        )
+        existing_pks = self.get_pk_values(table_name)
 
-        # Cache PKs
-        if not self._existing_pks and existing_pks:
-            self._existing_pks = existing_pks
 
         if not existing_pks:
             return None
@@ -1199,11 +1721,21 @@ class WorkerContext:
         else:
             return self.rnd.choice(existing_pks)
 
+    def get_all_columns(self, table_name: str) -> List[str]:
+        """Column names of ``table_name``, looked up once per process. The
+        setup helpers and the write operations need them on every row, and
+        an information_schema query costs tens of ms on the Dolt servers."""
+        if table_name not in self._columns:
+            self._columns[table_name] = _cached_meta(
+                self._meta_key("columns", table_name),
+                lambda: dbh.get_all_columns(self.db_tools.get_current_connection(), table_name),
+            )
+        return self._columns[table_name]
+
     def generate_row(self, table_name: str) -> dict:
         """Generate a fake data row for the table."""
         if not self._table_datagen:
-            table_schema = self.db_tools.get_table_schema(table_name)
-            self._table_datagen = DynamicDataGenerator(table_schema)
+            self._table_datagen = DynamicDataGenerator(self.get_table_schema(table_name))
         return self._table_datagen.generate_row()
 
     def track_modified_key(self, key: Tuple) -> None:
@@ -1222,6 +1754,16 @@ class WorkerContext:
     def record_keys_touched(self, num_keys: int) -> None:
         """Record number of keys touched for this operation."""
         self.db_tools.result_collector.record_num_keys_touched(num_keys)
+
+    def record_branch_count(self, n: int) -> None:
+        """Set the ``branch_count`` column of the rows this worker (or the
+        current asyncio task) records from now on."""
+        self.db_tools.result_collector.record_branch_count(n)
+
+    def live_branch_count(self) -> int:
+        """Branches in the shared list other than the backend's root."""
+        root = self.backend_info.root_branch_name
+        return sum(1 for b in self.branch_manager.get_all_branches() if b != root)
 
     def get_next_branch_id(self) -> int:
         """Get next unique branch ID."""
@@ -1258,11 +1800,7 @@ class WorkerContext:
         Used to turn a backfill fraction into a concrete row count.
         """
         pk_columns = self.get_pk_columns(table_name)
-        existing_pks = self._existing_pks or dbh.get_pk_values(
-            self.db_tools.get_current_connection(), table_name, pk_columns
-        )
-        if not self._existing_pks and existing_pks:
-            self._existing_pks = existing_pks
+        existing_pks = self.get_pk_values(table_name)
         return len(existing_pks) if existing_pks else 0
 
     def prepare_range_query(
@@ -1276,12 +1814,8 @@ class WorkerContext:
         pk_columns = self.get_pk_columns(table_name)
 
         # Get all PKs sorted
-        existing_pks = self._existing_pks or dbh.get_pk_values(
-            self.db_tools.get_current_connection(), table_name, pk_columns
-        )
+        existing_pks = self.get_pk_values(table_name)
 
-        if not self._existing_pks and existing_pks:
-            self._existing_pks = existing_pks
 
         if not existing_pks:
             raise ValueError(f"No existing keys for {operation_name}")
@@ -1319,6 +1853,26 @@ class WorkerContext:
             f"{pk_tuple_sql} >= ({placeholders_start}) AND "
             f"{pk_tuple_sql} <= ({placeholders_end})"
         )
+        # Per-column bounds: equality on the leading key columns both ends
+        # share, then a range on the next one. When that column is the last
+        # key column they select exactly the range and replace the row
+        # comparison; otherwise they are added to it. Postgres estimates a
+        # row comparison from its first column only (stock: every row has
+        # s_w_id = 1, so "all rows") and picks a sequential scan, and even
+        # when forced onto the index it reads ~200 pages for 100 rows; with
+        # plain per-column bounds it reads the ~15 pages the range covers.
+        extra = []
+        exact = True
+        for i, col in enumerate(pk_columns):
+            if start_key[i] == end_key[i]:
+                extra.append(f"{col} = %(_start_{i})s")
+                continue
+            extra.append(f"{col} >= %(_start_{i})s AND {col} <= %(_end_{i})s")
+            exact = i == len(pk_columns) - 1
+            break
+        if extra:
+            extra_sql = " AND ".join(extra)
+            where_clause = extra_sql if exact else f"{where_clause} AND {extra_sql}"
 
         return {
             "keys_in_range": keys_in_range,
@@ -1389,9 +1943,7 @@ class WorkerContext:
         """Insert without timing (for setup)."""
         cur_branch_id = self.current_branch
 
-        col_names = dbh.get_all_columns(
-            self.db_tools.get_current_connection(), table_name
-        )
+        col_names = self.get_all_columns(table_name)
         pk_columns = self.get_pk_columns(table_name)
 
         placeholders = ", ".join([f"%({name})s" for name in col_names])
@@ -1417,9 +1969,7 @@ class WorkerContext:
             return  # Skip if no keys
 
         pk_columns = self.get_pk_columns(table_name)
-        all_columns = dbh.get_all_columns(
-            self.db_tools.get_current_connection(), table_name
-        )
+        all_columns = self.get_all_columns(table_name)
         non_pk_columns = [col for col in all_columns if col not in pk_columns]
 
         if not non_pk_columns:
@@ -1460,16 +2010,34 @@ class WorkerContext:
 class OperationRunner:
     """Creates and executes operations using the registry pattern."""
 
-    def __init__(self, config: BenchmarkConfig, context: WorkerContext):
+    def __init__(self, config: BenchmarkConfig, context: WorkerContext,
+                 op_type: Optional[int] = None):
         self.config = config
         self.context = context
+        # The configured operation, or another one (a background client's)
+        self.op_type = config.operation_type if op_type is None else op_type
 
         # Create the operation instance
         self.operation = self._create_operation()
 
+    def run_until(self, stopped) -> Tuple[int, int, str]:
+        """Run the operation back to back until stopped() is true (a
+        background client). Returns (completed, failed, first error); failures
+        are not recorded as the measured run's failures."""
+        done = failed = 0
+        first_error = ""
+        while not stopped():
+            try:
+                self.operation.execute(self.context)
+                done += 1
+            except Exception as e:
+                failed += 1
+                first_error = first_error or f"{type(e).__name__}: {e}"[:300]
+        return done, failed, first_error
+
     def _create_operation(self):
         """Create the operation instance based on config."""
-        op_type = self.config.operation_type
+        op_type = self.op_type
         table_name = self.config.table_name
 
         # Operation-specific parameters
@@ -1568,6 +2136,7 @@ class OperationRunner:
             tp.OperationType.INSERT,
             tp.OperationType.UPDATE,
             tp.OperationType.DELETE,
+            tp.OperationType.MIXED,
         ]:
             return OperationRegistry.create(op_type, table_name=table_name)
         elif op_type == tp.OperationType.BRANCH_LOG:
@@ -1800,6 +2369,7 @@ class AsyncOperationRunner:
             tp.OperationType.INSERT,
             tp.OperationType.UPDATE,
             tp.OperationType.DELETE,
+            tp.OperationType.MIXED,
         ]:
             return OperationRegistry.create(op_type, table_name=table_name)
         elif op_type == tp.OperationType.BRANCH_LOG:
@@ -2049,6 +2619,75 @@ class AsyncOperationRunner:
 # ============================================================================
 
 
+def _merge_support(summaries: list) -> dict:
+    """Combine the support summaries of several client processes."""
+    counts: Dict[str, Dict[str, int]] = {}
+    unsupported = set()
+    for s in summaries:
+        unsupported.update(s.get("unsupported_ops", []))
+        for op, by_status in s.get("op_status_counts", {}).items():
+            dst = counts.setdefault(op, {})
+            for status, n in by_status.items():
+                dst[status] = dst.get(status, 0) + n
+    return {"workflow_supported": not unsupported, "unsupported_ops": sorted(unsupported),
+            "op_status_counts": counts}
+
+
+def _client_process_main(proc_idx, config_bytes, backend_info, setup_branches, thread_ids,
+                         assignments, seed, output_dir, shared, results_q, background=None) -> None:
+    """Entry point of one client process (num_processes > 1): run this
+    process's worker threads behind the shared start barrier, write their
+    rows to <run_id>.part<i>.parquet, and report back on results_q."""
+    out = {"proc": proc_idx, "part": None, "error": None, "failed": [],
+           "support": None, "client_cpu": None}
+    try:
+        register_all_operations()
+        proto = tp.TaskConfig()
+        proto.ParseFromString(config_bytes)
+        config = BenchmarkConfig(proto)
+        collector = rc.ResultCollector(run_id=config.run_id, output_dir=output_dir)
+        executor = BenchmarkExecutor(config, backend_info, setup_branches, collector)
+        measured_here = sum(1 for t in thread_ids if t < config.num_threads)
+        timed = ProcessTimedPhase(shared, measured_here, background)
+        executor._timed_phase = timed
+        executor._bg = background
+        progress = SharedProgress(total=len(thread_ids) * config.num_ops, disable=True)
+        executor._execute_multi_threaded(seed, assignments, progress, thread_ids=thread_ids)
+        part = f"{config.run_id}.part{proc_idx}.parquet"
+        if collector.total_rows:
+            collector.write_to_parquet(filename=part, append=False)
+            out["part"] = os.path.join(output_dir, part)
+        out.update(failed=list(collector.failed_operations), support=collector.support_summary(),
+                   client_cpu=timed.client_cpu_seconds(),
+                   background_failed=executor._background_failed,
+                   background_error=executor._background_error)
+    except BaseException as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        try:
+            shared[0].abort()   # release the other processes' workers
+            if background is not None:
+                background.stop()
+        except Exception:
+            pass
+    finally:
+        results_q.put(out)
+
+
+def _latency_quantiles(rows: list) -> dict:
+    """n, mean and p50/p95/p99/max of the rows' latencies (seconds)."""
+    if not rows:
+        return {"n": 0}
+    lat = np.array([r.latency for r in rows], dtype=float)
+    return {
+        "n": int(lat.size),
+        "mean": float(lat.mean()),
+        "p50": float(np.percentile(lat, 50)),
+        "p95": float(np.percentile(lat, 95)),
+        "p99": float(np.percentile(lat, 99)),
+        "max": float(lat.max()),
+    }
+
+
 class BenchmarkExecutor:
     """Orchestrates benchmark execution with thread management."""
 
@@ -2066,6 +2705,11 @@ class BenchmarkExecutor:
 
         # Shared state
         self.branch_manager = SharedBranchManager(initial_branches=setup_branches)
+        # Background clients (background_load): control and failure count
+        self._bg: Optional[BackgroundControl] = None
+        self._background_failed = 0
+        self._background_error = ""
+        self._bg_lock = threading.Lock()
 
     def execute(self) -> dict:
         """Execute the benchmark and return metrics.
@@ -2100,29 +2744,40 @@ class BenchmarkExecutor:
         print(f"Seed: {fixed_seed}")
         print(f"{'='*60}\n")
 
-        # All workers start their timed ops together; see TimedPhase.
-        self._timed_phase = TimedPhase(num_threads)
         wall_start = time.time()
-
-        try:
-            if num_threads == 1:
-                # Single-threaded execution
-                self._execute_single_threaded(
-                    fixed_seed, thread_branch_assignments.get(0, []), shared_progress
-                )
-            else:
-                # Multi-threaded execution
-                self._execute_multi_threaded(
-                    fixed_seed, thread_branch_assignments, shared_progress
-                )
-        finally:
+        merged = None
+        remote = RemoteCpuSampler().start()
+        if self.config.num_processes > 1:
+            # Threads spread over client processes; rows merged afterwards.
             shared_progress.close()
+            merged = self._execute_multi_process(fixed_seed, thread_branch_assignments)
+        else:
+            # All workers start their timed ops together; see TimedPhase.
+            self._timed_phase = TimedPhase(num_threads)
+            if self.config.background_workers:
+                self._bg = BackgroundControl(self.config.background_workers)
+                self._timed_phase.background = self._bg
+            try:
+                if num_threads == 1 and not self._bg:
+                    # Single-threaded execution
+                    self._execute_single_threaded(
+                        fixed_seed, thread_branch_assignments.get(0, []), shared_progress
+                    )
+                else:
+                    # Multi-threaded execution
+                    self._execute_multi_threaded(
+                        fixed_seed, thread_branch_assignments, shared_progress
+                    )
+            finally:
+                shared_progress.close()
 
         # Throughput window: from the start barrier (every worker connected
         # and warmed up) to the last worker finishing its timed ops. Thread
         # start-up, connection/pool setup and teardown are excluded.
         start_time = self._timed_phase.start_time
         end_time = self._timed_phase.end_time
+        time.sleep(remote.period * 1.5 if remote.targets else 0)   # a sample after the window
+        remote.stop()
         if start_time is None or end_time is None:
             raise RuntimeError(
                 "No worker completed the timed phase; see the worker errors above."
@@ -2130,11 +2785,137 @@ class BenchmarkExecutor:
         elapsed_time = end_time - start_time
         wall_time = time.time() - wall_start
 
-        metrics = self._calculate_metrics(total_ops, elapsed_time)
+        all_rows = self.result_collector.results if merged is None else merged["rows"]
+        measured, background = self._split_rows(all_rows)
+        if merged is None:
+            metrics = self._calculate_metrics(total_ops, elapsed_time, rows=measured)
+            cpu = self._timed_phase.cpu_usage()
+        else:
+            metrics = self._calculate_metrics(
+                total_ops, elapsed_time, rows=measured,
+                failed_ops=merged["failed"], support=merged["support"],
+            )
+            metrics["rows_merged"] = True   # already in <run_id>.parquet
+            cpu = merged["cpu"]
+            self._background_failed = merged.get("background_failed", 0)
+            self._background_error = merged.get("background_error", "")
+        if self.config.background_workers:
+            metrics["background"] = self._background_metrics(background, start_time, end_time)
         metrics["wall_time"] = wall_time
+        metrics["num_processes"] = self.config.num_processes
+        metrics["remote_cpu"] = remote.usage(start_time, end_time)
+        # Average busy cores over the timed window: the server process (when
+        # co-located, DBFORK_SERVER_PID) and all client processes together.
+        for who in ("server", "client"):
+            secs = cpu.get(f"{who}_cpu_seconds")
+            metrics[f"{who}_cpu_cores"] = (secs / elapsed_time
+                                           if secs is not None and elapsed_time > 0 else None)
         self._print_metrics(metrics)
 
         return metrics
+
+    def _split_rows(self, rows) -> Tuple[list, list]:
+        """(measured rows, background rows): background clients have
+        thread ids from num_threads up."""
+        t = self.config.num_threads
+        measured = [r for r in rows if r.thread_id < t]
+        return measured, [r for r in rows if r.thread_id >= t]
+
+    def _background_metrics(self, rows, start: float, end: float) -> dict:
+        """What the background clients did inside the timed window."""
+        inside = [r for r in rows if r.status == rslt.OpStatus.OK and start <= r.start_time <= end]
+        ops = sum(1 for r in inside if r.op_type in rc.VERB_OP_TYPES)
+        statements = [r for r in inside if r.op_type in rc.STATEMENT_OP_TYPES]
+        elapsed = end - start
+        return {
+            "operation": tp.OperationType.Name(self.config.background_operation),
+            "clients": self.config.background_workers,
+            "ops_in_window": ops,
+            "throughput": ops / elapsed if elapsed > 0 else 0.0,
+            "failed": self._background_failed,
+            "first_error": self._background_error or None,
+            "latency": {"statements": _latency_quantiles(statements)},
+        }
+
+    def _background_branches(self) -> List[str]:
+        root = self.backend_info.root_branch_name
+        return [b for b in self.setup_branches if b != root]
+
+    def _execute_multi_process(self, fixed_seed: int, assignments: Dict[int, List[str]]) -> dict:
+        """Run the worker threads in num_processes client processes (spawned,
+        each running its share of thread ids with _execute_multi_threaded),
+        then merge their rows into <run_id>.parquet. Returns the rows and
+        counters the metrics need."""
+        num_threads = self.config.num_threads
+        nproc = self.config.num_processes
+        ctx = mp.get_context("spawn")
+        times = ctx.Array("d", [0.0, 0.0, -1.0, -1.0], lock=False)
+        done = ctx.Value("i", 0, lock=False)
+        shared = (ctx.Barrier(num_threads), times, done, ctx.Lock(), num_threads)
+        results_q = ctx.Queue()
+        n_bg = self.config.background_workers
+        background = BackgroundControl(n_bg, ctx) if n_bg else None
+        groups = [list(range(num_threads + n_bg))[i::nproc] for i in range(nproc)]
+        out_dir = self.result_collector.output_dir
+        print(f"Client processes: {nproc} ({min(map(len, groups))}-{max(map(len, groups))} threads each)")
+
+        procs = []
+        for i, tids in enumerate(groups):
+            p = ctx.Process(
+                target=_client_process_main, name=f"client-{i}",
+                args=(i, self.config._proto.SerializeToString(), self.backend_info,
+                      self.setup_branches, tids, {t: assignments.get(t, []) for t in tids},
+                      fixed_seed, out_dir, shared, results_q, background),
+            )
+            p.start()
+            procs.append(p)
+        results = []
+        while len(results) < len(procs):
+            try:
+                results.append(results_q.get(timeout=5))
+            except queue.Empty:
+                if not any(p.is_alive() for p in procs):
+                    break   # a process died without reporting
+        for p in procs:
+            p.join()
+        for r in results:
+            if r["error"]:
+                print(f"Client process {r['proc']} failed: {r['error']}")
+        if len(results) < len(procs):
+            print(f"{len(procs) - len(results)} client process(es) exited without reporting")
+
+        # Merge the per-process row files into the run's parquet file.
+        parts = sorted(r["part"] for r in results if r["part"])
+        rows = []
+        if parts:
+            table = pa.concat_tables([pq.read_table(p) for p in parts], promote_options="default")
+            main_path = os.path.join(out_dir, f"{self.config.run_id}.parquet")
+            if os.path.exists(main_path):
+                full = pa.concat_tables([pq.read_table(main_path), table], promote_options="default")
+            else:
+                full = table
+            pq.write_table(full, main_path)
+            for p in parts:
+                os.remove(p)
+            print(f"Merged {len(table)} rows from {len(parts)} client processes into {main_path}")
+            cols = table.select(["op_type", "status", "latency", "thread_id", "start_time"]).to_pydict()
+            rows = [SimpleNamespace(op_type=o, status=rslt.OpStatus.Value(s), latency=l,
+                                    thread_id=t, start_time=st)
+                    for o, s, l, t, st in zip(cols["op_type"], cols["status"], cols["latency"],
+                                              cols["thread_id"], cols["start_time"])]
+
+        failed = [f for r in results for f in r["failed"]]
+        self.result_collector.failed_operations.extend(failed)
+        support = _merge_support([r["support"] for r in results if r["support"]])
+        start, end = times[0] or None, times[1] or None
+        self._timed_phase = SimpleNamespace(start_time=start, end_time=end)
+        server_cpu = times[3] - times[2] if times[2] >= 0 and times[3] >= 0 else None
+        client = [r["client_cpu"] for r in results]
+        client_cpu = sum(client) if client and None not in client else None
+        return {"rows": rows, "failed": len(failed), "support": support,
+                "background_failed": sum(r.get("background_failed", 0) for r in results),
+                "background_error": next((r["background_error"] for r in results if r.get("background_error")), ""),
+                "cpu": {"server_cpu_seconds": server_cpu, "client_cpu_seconds": client_cpu}}
 
     def _assign_branches_to_threads(self) -> Dict[int, List[str]]:
         """Assign branches to threads for multi-threaded execution."""
@@ -2142,23 +2923,38 @@ class BenchmarkExecutor:
         if not self.setup_branches or num_threads == 1:
             return {}
 
+        # The setup worker lists the backend's root branch too; load goes to
+        # the setup branches only, so N branches means N loaded branches.
+        root = self.backend_info.root_branch_name
+        branches = [b for b in self.setup_branches if b != root]
+        if not branches:
+            return {}
+
         assignments = {}
-        num_branches = len(self.setup_branches)
+        num_branches = len(branches)
 
         if num_threads <= num_branches:
             # Round-robin assignment
             for tid in range(num_threads):
                 assignments[tid] = [
-                    self.setup_branches[idx]
+                    branches[idx]
                     for idx in range(tid, num_branches, num_threads)
                 ]
         else:
             # More threads than branches: cyclic assignment
             for tid in range(num_threads):
-                assigned_branch = self.setup_branches[tid % num_branches]
+                assigned_branch = branches[tid % num_branches]
                 assignments[tid] = [assigned_branch]
 
         return assignments
+
+    def loaded_branches(self) -> int:
+        """Branches that get load: one per thread up to the setup branches
+        (each worker connects to its first assigned branch), or 1 without setup."""
+        assignments = self._assign_branches_to_threads()
+        if not assignments:
+            return 1
+        return len({v[0] for v in assignments.values() if v})
 
     def _execute_single_threaded(
         self, seed: int, assigned_branches: List[str], progress: SharedProgress
@@ -2183,12 +2979,8 @@ class BenchmarkExecutor:
 
             # Set context for result collection
             table_name = self.config.table_name
-            table_schema = ctx.db_tools.get_table_schema(table_name)
-            initial_db_size = 0
-            try:
-                initial_db_size = dbh.get_db_size(ctx.db_tools.get_current_connection())
-            except Exception:
-                pass
+            table_schema = ctx.get_table_schema(table_name)
+            initial_db_size = ctx.initial_db_size()
 
             ctx.db_tools.result_collector.set_context(
                 table_name=table_name,
@@ -2217,8 +3009,10 @@ class BenchmarkExecutor:
         fixed_seed: int,
         branch_assignments: Dict[int, List[str]],
         progress: SharedProgress,
+        thread_ids: Optional[List[int]] = None,
     ) -> None:
-        """Execute benchmark with multiple threads."""
+        """Execute benchmark with multiple threads (``thread_ids``: this
+        process's share when the threads are spread over client processes)."""
 
         def worker_fn(thread_id: int, assigned_branches: List[str]):
             """Worker function for each thread.
@@ -2235,7 +3029,42 @@ class BenchmarkExecutor:
                 self._timed_phase.abort()
                 raise
 
+        def run_background(thread_id: int, branch: str):
+            """A background client: keep ``branch`` busy until stopped."""
+            rc.set_current_thread_id(thread_id)
+            seed = fixed_seed + thread_id
+            with WorkerContext(
+                config=self.config, backend_info=self.backend_info, thread_id=thread_id,
+                seed=seed, result_collector=self.result_collector,
+                branch_manager=self.branch_manager, shared_progress=progress,
+                assigned_branches=[branch],
+            ) as ctx:
+                table_name = self.config.table_name
+                ctx.db_tools.result_collector.set_context(
+                    table_name=table_name, table_schema=ctx.get_table_schema(table_name),
+                    initial_db_size=ctx.initial_db_size(), seed=seed,
+                )
+                runner = OperationRunner(self.config, ctx, op_type=self.config.background_operation)
+                # One untimed operation first (connection, key cache, row
+                # generator), so the client is really working once it
+                # reports started.
+                ctx.db_tools.result_collector.set_recording(False)
+                try:
+                    runner.operation.execute(ctx)
+                except Exception:
+                    pass
+                finally:
+                    ctx.db_tools.result_collector.set_recording(True)
+                self._bg.started()
+                _, failed, error = runner.run_until(self._bg.stopped)
+                with self._bg_lock:
+                    self._background_failed += failed
+                    self._background_error = self._background_error or error
+            return None
+
         def run_worker(thread_id: int, assigned_branches: List[str]):
+            if thread_id >= self.config.num_threads:
+                return run_background(thread_id, assigned_branches[0])
             rc.set_current_thread_id(thread_id)
             worker_seed = fixed_seed + thread_id
 
@@ -2256,12 +3085,8 @@ class BenchmarkExecutor:
 
                 # Set context
                 table_name = self.config.table_name
-                table_schema = ctx.db_tools.get_table_schema(table_name)
-                initial_db_size = 0
-                try:
-                    initial_db_size = dbh.get_db_size(ctx.db_tools.get_current_connection())
-                except Exception:
-                    pass
+                table_schema = ctx.get_table_schema(table_name)
+                initial_db_size = ctx.initial_db_size()
 
                 ctx.db_tools.result_collector.set_context(
                     table_name=table_name,
@@ -2269,6 +3094,11 @@ class BenchmarkExecutor:
                     initial_db_size=initial_db_size,
                     seed=worker_seed,
                 )
+
+                # With background load, start measuring only once every
+                # background client is running.
+                if self._bg is not None:
+                    self._bg.wait_started()
 
                 # Create and execute operations
                 # Use async runner if use_async or concurrent_requests > 1
@@ -2284,16 +3114,19 @@ class BenchmarkExecutor:
                     )
                     return None
 
-        # Execute with thread pool
-        num_threads = self.config.num_threads
-        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        # Execute with thread pool; background clients (thread ids from
+        # num_threads up) each keep one setup branch busy.
+        if thread_ids is None:
+            thread_ids = list(range(self.config.num_threads + self.config.background_workers))
+        bg_branches = self._background_branches()
+        def assigned(tid: int) -> List[str]:
+            if tid >= self.config.num_threads:
+                return [bg_branches[tid - self.config.num_threads]]
+            return branch_assignments.get(tid, [])
+        with ThreadPoolExecutor(max_workers=len(thread_ids)) as executor:
             futures = [
-                executor.submit(
-                    worker_fn,
-                    thread_id=tid,
-                    assigned_branches=branch_assignments.get(tid, []),
-                )
-                for tid in range(num_threads)
+                executor.submit(worker_fn, thread_id=tid, assigned_branches=assigned(tid))
+                for tid in thread_ids
             ]
 
             # Wait for completion and collect stats
@@ -2310,18 +3143,22 @@ class BenchmarkExecutor:
             if thread_stats:
                 self._print_aggregate_summary(thread_stats)
 
-    def _calculate_metrics(self, total_ops: int, elapsed_time: float) -> dict:
+    def _calculate_metrics(self, total_ops: int, elapsed_time: float, rows=None,
+                           failed_ops: Optional[int] = None, support: Optional[dict] = None) -> dict:
         """Calculate throughput and latency metrics.
 
         Note: total_ops is the intended count (num_ops * num_threads).
-        Actual successful operation count is len(self.result_collector.results).
+        ``rows`` (op_type, status, latency) default to this process's
+        collector; the multi-process path passes the merged rows.
         """
         # One verb row (BRANCH, DELETE, ...) or one EXEC row per operation;
         # the statement rows inside an exec are its breakdown.
-        rows = self.result_collector.results
+        if rows is None:
+            rows = self.result_collector.results
         ok_rows = [r for r in rows if r.status == rslt.OpStatus.OK]
         actual_ops = sum(1 for r in ok_rows if r.op_type in rc.VERB_OP_TYPES)
-        failed_ops = len(self.result_collector.failed_operations)
+        if failed_ops is None:
+            failed_ops = len(self.result_collector.failed_operations)
         throughput = actual_ops / elapsed_time if elapsed_time > 0 else 0
 
         # Data operation throughput: the SQL statements themselves
@@ -2339,7 +3176,12 @@ class BenchmarkExecutor:
             "data_ops_count": data_ops_count,
             "data_ops_time": data_ops_time,
             "data_throughput": data_throughput,
-            "support": self.result_collector.support_summary(),
+            "loaded_branches": self.loaded_branches(),
+            "latency": {
+                "ops": _latency_quantiles([r for r in ok_rows if r.op_type in rc.VERB_OP_TYPES]),
+                "statements": _latency_quantiles(data_ops),
+            },
+            "support": support if support is not None else self.result_collector.support_summary(),
         }
 
     def _print_aggregate_summary(self, thread_stats: list) -> None:
@@ -2416,16 +3258,20 @@ class ResultManager:
         result_collector: rc.ResultCollector,
         metrics: dict,
         output_dir: str,
+        data_source: Optional[dict] = None,
     ):
         self.config = config
         self.result_collector = result_collector
         self.metrics = metrics
         self.output_dir = output_dir
+        self.data_source = data_source or {"source": config.source or "none"}
 
     def write_results(self) -> None:
         """Write all results to files."""
-        # Write main parquet file
-        self.result_collector.write_to_parquet()
+        # Write main parquet file (the multi-process path has already merged
+        # its client processes' rows into it)
+        if not self.metrics.get("rows_merged"):
+            self.result_collector.write_to_parquet()
 
         # Write summary JSON
         self._write_summary_json()
@@ -2455,6 +3301,17 @@ class ResultManager:
             "data_ops_count": self.metrics["data_ops_count"],
             "data_ops_time": self.metrics["data_ops_time"],
             "data_throughput": self.metrics["data_throughput"],
+            "loaded_branches": self.metrics.get("loaded_branches"),
+            "num_processes": self.metrics.get("num_processes", 1),
+            # Average busy cores in the timed window (server: only when co-located)
+            "server_cpu_cores": self.metrics.get("server_cpu_cores"),
+            "client_cpu_cores": self.metrics.get("client_cpu_cores"),
+            # Remote machines (DBFORK_REMOTE_CPU): process and node CPU cores, disk utilisation
+            "remote_cpu": self.metrics.get("remote_cpu"),
+            # background_load: what the clients keeping every setup branch busy did
+            "background": self.metrics.get("background"),
+            "latency": self.metrics.get("latency", {}),  # seconds; ops = verbs/EXEC, statements = SQL inside exec
+            "data_source": self.data_source,
             "support": self.metrics.get("support", {}),
         }
         # Server behaviour the backend worked around (retries and the like)
@@ -2519,6 +3376,7 @@ def register_all_operations() -> None:
     OperationRegistry.register(tp.OperationType.DELETE, DeleteOperation)
     OperationRegistry.register(tp.OperationType.RANGE_READ, RangeReadOperation)
     OperationRegistry.register(tp.OperationType.RANGE_UPDATE, RangeUpdateOperation)
+    OperationRegistry.register(tp.OperationType.MIXED, MixedOperation)
 
     # Branch operations
     OperationRegistry.register(tp.OperationType.BRANCH_CREATE, BranchCreateOperation)
@@ -2601,6 +3459,12 @@ def main():
         # 1. Setup backend
         backend_mgr = BackendManager(config, args.output_dir)
         backend_info = backend_mgr.setup()
+        data_source = None
+        if config.source == "generated":
+            data_source = seed_generated_database(
+                config.backend, backend_info, config.db_name, config.generated,
+                config.scale_factor,
+            )
 
         # 2. Setup phase (UNTIMED)
         if config.num_branches > 0:
@@ -2617,7 +3481,8 @@ def main():
         metrics = executor.execute()
 
         # 4. Write results
-        result_mgr = ResultManager(config, result_collector, metrics, args.output_dir)
+        result_mgr = ResultManager(config, result_collector, metrics, args.output_dir,
+                                   data_source=data_source)
         result_mgr.write_results()
 
     finally:

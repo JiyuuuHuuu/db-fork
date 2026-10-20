@@ -29,6 +29,8 @@ enum Backend {
     MATRIXONE = 9;
     CHRONOS = 10;
     BAUPLAN = 11;
+    // 12 is TERMINUSDB in microbench/task2.proto
+    NEON_LOCAL = 13;
 }
 
 // ---------------------------------------------------------------------------

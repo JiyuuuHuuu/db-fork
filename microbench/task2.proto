@@ -14,7 +14,7 @@ enum Backend {
   CHRONOS = 10;
   BAUPLAN = 11;
   TERMINUSDB = 12;
-  
+  NEON_LOCAL = 13;  // self-hosted Neon cluster (dblib/neon_local.py)
 }
 
 // Operation types for benchmarking
@@ -26,6 +26,8 @@ enum OperationType {
   DELETE = 3;
   RANGE_READ = 4;
   RANGE_UPDATE = 5;
+  // 80% point reads, 20% point updates (a busy branch's workload)
+  MIXED = 6;
 
   // Branch operations
   BRANCH_CREATE = 10;
@@ -77,15 +79,27 @@ message SqlDump {
   string sql_dump_path = 1;
 }
 
+// CH-benCHmark data generated in the server by the macrobench generators
+// (macrobench/datagen/ch.py), foreign keys skipped, committed as the base.
+message GeneratedData {
+  int32 scale_factor = 1;     // W warehouses (0 = TaskConfig.scale_factor, else 1)
+  // Copy the tables from this already seeded database on the same server
+  // instead of generating them (Dolt backends only; created on first use).
+  string seed_db = 2;
+  int32 seed = 3;             // generator seed (0 = 42)
+  int32 seed_batch_rows = 4;  // rows per INSERT while seeding (0 = 500)
+}
+
 // Database setup configuration
 message DatabaseSetup {
   string db_name = 1;
   bool cleanup = 2;  // Whether to cleanup after benchmark
 
-  // Source: either existing database or SQL dump
+  // Source: an existing database, a SQL dump, or generated data
   oneof source {
     ExistingDatabase existing_db = 3;
     SqlDump sql_dump = 4;
+    GeneratedData generated = 5;
   }
 }
 
@@ -103,6 +117,9 @@ message SetupConfig {
   int32 inserts_per_branch = 3;
   int32 updates_per_branch = 4;
   int32 deletes_per_branch = 5;
+  // Branches set up concurrently (each creates its branch, connects to it and
+  // runs its untimed data operations). 0 or 1: one at a time, in order.
+  int32 setup_parallelism = 6;
 }
 
 // DDL operation specific configuration
@@ -129,6 +146,10 @@ message BranchOpConfig {
   int32 history_commits = 2;
   // ``limit`` passed to log(). Default 10.
   int32 log_limit = 3;
+  // BRANCH_CREATE: connect to every k-th created branch (a timed CONNECT
+  // row; for backends that start a compute per branch, that is the compute
+  // start), then return untimed to the creating branch. 0: never.
+  int32 connect_every = 4;
 }
 
 // Single operation benchmark configuration
@@ -170,6 +191,21 @@ message TaskConfig {
   // concurrent_requests uses the same runner and drivers at every point.
   // Async mode is always used when concurrent_requests > 1.
   bool use_async = 11;
+
+  // Client processes the worker threads are spread over (0 or 1 = all
+  // threads in this process). One Python process caps the client at a few
+  // thousand operations per second (the GIL); with several, the parent does
+  // the setup, each process runs its share of the threads behind one shared
+  // start barrier, and the parent merges their rows into one result file.
+  int32 num_processes = 12;
+
+  // Keep every setup branch busy during the timed phase: one extra client per
+  // setup branch runs background_operation back to back, from before the
+  // measured workers start until the last of them finishes. Its rows go to
+  // the same result file with thread_id >= num_threads and are summarised
+  // separately ("background" in the summary JSON).
+  bool background_load = 13;
+  OperationType background_operation = 14;
 
   // Single operation benchmark configuration
   OperationBenchmark operation_benchmark = 9;

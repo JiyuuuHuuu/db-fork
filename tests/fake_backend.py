@@ -6,11 +6,22 @@ leaves merge, rebase and revert unsupported to exercise that path.
 """
 
 import hashlib
+import re
 import sqlite3
 import time
 from contextlib import asynccontextmanager, contextmanager
 
 from dblib.db_api import DBToolSuite, Ref
+
+
+def _sqlite_params(q, vars):
+    """Scripts use DB-API placeholders (psycopg2/pymysql): "%s" with a
+    sequence, "%(name)s" with a dict. sqlite wants "?" and ":name"."""
+    if vars is None:
+        return q, ()
+    if isinstance(vars, dict):
+        return re.sub(r"%\((\w+)\)s", r":\1", q), vars
+    return q.replace("%s", "?"), vars
 
 
 class _Cursor:
@@ -26,11 +37,7 @@ class _Cursor:
         self._cur.close()
 
     def execute(self, q, vars=None):
-        # Scripts use DB-API "%s" placeholders (psycopg2/pymysql); sqlite
-        # wants "?".
-        if vars is not None and "%s" in q:
-            q = q.replace("%s", "?")
-        self._cur.execute(q, vars if vars is not None else ())
+        self._cur.execute(*_sqlite_params(q, vars))
 
     def fetchall(self):
         return self._cur.fetchall()
@@ -78,9 +85,7 @@ class _AsyncCursor:
         self._cur.close()
 
     async def execute(self, q, vars=None):
-        if vars is not None and "%s" in q:
-            q = q.replace("%s", "?")
-        self._cur.execute(q, vars if vars is not None else ())
+        self._cur.execute(*_sqlite_params(q, vars))
         self.description = self._cur.description
 
     async def fetchall(self):

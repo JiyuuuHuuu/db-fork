@@ -241,13 +241,27 @@ class ResultCollector:
                 with self._lock:
                     state = self._task_local.get(task)
                     if state is None:
-                        state = self._task_local[task] = _OperationState()
+                        # A task starts from its thread's context (table,
+                        # seed, branch count) with the per-op counters reset.
+                        state = self._task_local[task] = self._new_task_state()
                     return state
         except RuntimeError:
             pass
         if not hasattr(self._thread_local, "state"):
             self._thread_local.state = _OperationState()
         return self._thread_local.state
+
+    def _new_task_state(self) -> _OperationState:
+        base = getattr(self._thread_local, "state", None)
+        state = _OperationState()
+        if base is not None:
+            state.current_table_name = base.current_table_name
+            state.current_table_schema = base.current_table_schema
+            state.initial_db_size = base.initial_db_size
+            state.seed = base.seed
+            state.branch_count = base.branch_count
+            state.step_id = base.step_id
+        return state
 
     def set_recording(self, enabled: bool) -> None:
         """Turn recording on or off for the calling thread only.

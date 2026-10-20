@@ -15,6 +15,7 @@ from microbench.operations.crud import (
     DeleteOperation,
     RangeReadOperation,
     RangeUpdateOperation,
+    MixedOperation,
 )
 from microbench.operations.branch import (
     BranchCreateOperation,
@@ -56,6 +57,7 @@ __all__ = [
     "DeleteOperation",
     "RangeReadOperation",
     "RangeUpdateOperation",
+    "MixedOperation",
     "BranchCreateOperation",
     "BranchConnectOperation",
     "BranchDeleteOperation",

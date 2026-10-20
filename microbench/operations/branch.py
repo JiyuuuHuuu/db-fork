@@ -35,12 +35,26 @@ class BranchCreateOperation(Operation):
 
     def execute(self, context: 'WorkerContext') -> None:
         branch_name = self._generate_branch_name(context)
+        # The row carries the branches existing before this create (shared
+        # list, so approximate under concurrency).
+        context.record_branch_count(context.live_branch_count())
         context.db_tools.branch(
             branch_name,
             from_ref=context.current_ref,
             storage=context.measure_storage,
         ).raise_for_status()
         context.add_branch(branch_name)
+        # Every k-th new branch is also connected to (a timed CONNECT row:
+        # on backends with a compute per branch, its start), then the worker
+        # returns untimed to the branch it creates from.
+        cfg = getattr(context, "config", None)
+        k = cfg.branch_op_config.connect_every if cfg is not None else 0
+        if k > 0:
+            self._created = getattr(self, "_created", 0) + 1
+            if self._created % k == 0:
+                origin = context.current_branch
+                context.connect(branch_name)
+                context.connect(origin, timed=False)
 
     def requires_setup_data(self) -> bool:
         return False  # Can create branches without data

@@ -25,12 +25,15 @@ set -e
 # Parse arguments
 BACKEND=""
 SQL_DUMP_PATH=""
-SWEEP_MODE=""  # "concurrency", "branches", or "proportional"
+SWEEP_MODE=""  # "concurrency", "branches", "proportional" or "threads"
 MODE="async"   # "async" or "sync"
 FIXED_THREADS=""
 FIXED_BRANCHES=""
 BRANCH_LIST=""
 CONCURRENCY_LIST=""
+THREAD_LIST=""
+PROCESSES=1
+BACKGROUND_OP=""
 THREADS_PER_BRANCH="4"  # Default ratio for proportional mode
 OPERATIONS=""
 NUM_OPS_OVERRIDE=""
@@ -41,6 +44,14 @@ WARMUP_FRACTION=""
 CONCURRENT_REQUESTS="1"
 OUTPUT_DIR="/tmp/run_stats"
 TABLE_NAME=""
+GENERATED_SCALE=""
+SEED_DB=""
+INSERTS_PER_BRANCH=0
+UPDATES_PER_BRANCH=0
+DELETES_PER_BRANCH=0
+BRANCH_CREATE_OPS=10
+SETUP_PARALLELISM=0
+BRANCH_CREATE_CONNECT_EVERY=0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -55,6 +66,22 @@ while [[ $# -gt 0 ]]; do
         --sweep-proportional)
             SWEEP_MODE="proportional"
             shift
+            ;;
+        --sweep-threads)
+            SWEEP_MODE="threads"
+            shift
+            ;;
+        --thread-list)
+            THREAD_LIST="$2"
+            shift 2
+            ;;
+        --processes)
+            PROCESSES="$2"
+            shift 2
+            ;;
+        --background-op)
+            BACKGROUND_OP="$2"
+            shift 2
             ;;
         --mode)
             MODE="$2"
@@ -116,6 +143,42 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
+        --sql-dump)
+            SQL_DUMP_PATH="$2"
+            shift 2
+            ;;
+        --generated-scale)
+            GENERATED_SCALE="$2"
+            shift 2
+            ;;
+        --seed-db)
+            SEED_DB="$2"
+            shift 2
+            ;;
+        --inserts-per-branch)
+            INSERTS_PER_BRANCH="$2"
+            shift 2
+            ;;
+        --updates-per-branch)
+            UPDATES_PER_BRANCH="$2"
+            shift 2
+            ;;
+        --deletes-per-branch)
+            DELETES_PER_BRANCH="$2"
+            shift 2
+            ;;
+        --branch-create-ops)
+            BRANCH_CREATE_OPS="$2"
+            shift 2
+            ;;
+        --setup-parallelism)
+            SETUP_PARALLELISM="$2"
+            shift 2
+            ;;
+        --branch-create-connect-every)
+            BRANCH_CREATE_CONNECT_EVERY="$2"
+            shift 2
+            ;;
         -*)
             echo "Error: Unknown option '$1'"
             exit 1
@@ -133,23 +196,32 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+# Without a SQL dump, CH-benCHmark data is generated in the server.
+if [ -z "$SQL_DUMP_PATH" ] && [ -z "$GENERATED_SCALE" ]; then
+    GENERATED_SCALE=1
+fi
 
 # Validate required arguments
-if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$SWEEP_MODE" ]; then
-    echo "Usage: $0 <backend> <sql_dump_path> {--sweep-concurrency | --sweep-branches | --sweep-proportional} [options]"
+if [ -z "$BACKEND" ] || [ -z "$SWEEP_MODE" ]; then
+    echo "Usage: $0 <backend> [<sql_dump_path>] {--sweep-concurrency | --sweep-branches | --sweep-proportional | --sweep-threads} [options]"
     echo ""
     echo "Required arguments:"
-    echo "  backend: dolt, dolt_mysql, seekdb, neon, xata, file_copy"
-    echo "  sql_dump_path: Path to SQL dump file"
+    echo "  backend: dolt, dolt_mysql, seekdb, neon, neon_local, xata, file_copy"
+    echo "  sql_dump_path: Path to SQL dump file (omit to generate CH-benCHmark data, see --generated-scale)"
     echo "  --sweep-concurrency: Fix threads/branches, vary concurrent requests (requires --threads and --branches; async only)"
     echo "  --sweep-branches: Fix threads, vary branches (requires --threads)"
     echo "  --sweep-proportional: Vary both threads and branches proportionally"
+    echo "  --sweep-threads: Fix branches, vary threads (requires --branches and --thread-list)"
     echo ""
     echo "Options:"
     echo "  --mode <async|sync>: Runner to use (default: async). Sync runs one op at a time per thread."
     echo "  --threads <N>: Fixed thread count (for --sweep-concurrency and --sweep-branches modes)"
     echo "  --branches <N>: Fixed branch count (for --sweep-concurrency mode)"
     echo "  --threads-per-branch <N>: Threads per branch ratio for --sweep-proportional (default: 4)"
+    echo "  --thread-list <list>: Thread counts for --sweep-threads (e.g., 1,4,16)"
+    echo "  --background-op <OP>: Keep every setup branch busy with one client running OP (e.g. MIXED)"
+    echo "  --processes <N>: Spread the threads over N client processes (default 1; one Python"
+    echo "                   process caps the client at a few thousand ops/s)"
     echo "  --branch-list <list>: Comma-separated branch counts (e.g., '1,2,4,8,16')"
     echo "  --concurrency-list <list>: Comma-separated concurrency levels (e.g., '1,2,4,8,16')"
     echo "  --concurrent-requests <n>: Ops in flight per thread, one pooled connection each (default: 1; async only if > 1)"
@@ -188,6 +260,11 @@ if [ "$SWEEP_MODE" = "concurrency" ]; then
     fi
 fi
 
+if [ "$SWEEP_MODE" = "threads" ] && { [ -z "$FIXED_BRANCHES" ] || [ -z "$THREAD_LIST" ]; }; then
+    echo "Error: --sweep-threads requires --branches <N> and --thread-list <list>"
+    exit 1
+fi
+
 if [ "$SWEEP_MODE" = "branches" ] && [ -z "$FIXED_THREADS" ]; then
     echo "Error: --sweep-branches requires --threads <N>"
     exit 1
@@ -198,7 +275,7 @@ BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 BACKEND_LOWER=$(echo "$BACKEND" | tr '[:upper:]' '[:lower:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|XATA|FILE_COPY)$ ]]; then
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|NEON_LOCAL|XATA|FILE_COPY)$ ]]; then
     echo "Error: Invalid backend '$BACKEND'"
     exit 1
 fi
@@ -217,9 +294,13 @@ else
     exit 1
 fi
 
-# Check SQL dump file
-if [ ! -f "$SQL_DUMP_PATH" ]; then
+# Check SQL dump file (when one is used)
+if [ -n "$SQL_DUMP_PATH" ] && [ ! -f "$SQL_DUMP_PATH" ]; then
     echo "Error: SQL dump file not found: $SQL_DUMP_PATH"
+    exit 1
+fi
+if [ -n "$SEED_DB" ] && [[ ! "$BACKEND" =~ ^(dolt|dolt_mysql|neon_local)$ ]]; then
+    echo "Error: --seed-db is supported on dolt, dolt_mysql and neon_local only"
     exit 1
 fi
 
@@ -273,10 +354,28 @@ elif [ "$SWEEP_MODE" = "proportional" ]; then
     echo "Throughput Benchmark: SWEEP PROPORTIONAL"
     echo "Threads per branch: $THREADS_PER_BRANCH"
     echo "Branch counts: ${BRANCH_COUNTS[*]}"
+elif [ "$SWEEP_MODE" = "threads" ]; then
+    # Fix branches, vary threads (e.g. N clients all on one branch, the
+    # control for N clients on N branches)
+    IFS=',' read -ra THREAD_COUNTS <<< "$THREAD_LIST"
+    echo "==================================================="
+    echo "Throughput Benchmark: SWEEP THREADS"
+    echo "Fixed branches: $FIXED_BRANCHES"
+    echo "Thread counts: ${THREAD_COUNTS[*]}"
+fi
+echo "Client processes: $PROCESSES (capped at the client count)"
+# Every setup branch busy: one background client per branch runs BACKGROUND_OP
+# for the whole timed phase.
+if [ -n "$BACKGROUND_OP" ]; then
+    BACKGROUND_BLOCK="background_load: true
+background_operation: ${BACKGROUND_OP}"
+    echo "Background load: one client per setup branch running $BACKGROUND_OP"
+else
+    BACKGROUND_BLOCK=""
 fi
 
 echo "Backend: $BACKEND"
-echo "SQL Dump: $SQL_DUMP_PATH"
+echo "Data: ${SQL_DUMP_PATH:-generated CH-benCHmark W=$GENERATED_SCALE${SEED_DB:+ (copied from $SEED_DB)}}"
 echo "Operations: ${OPS_ARRAY[*]}"
 echo "Execution mode: $MODE"
 if [ "$SWEEP_MODE" != "concurrency" ]; then
@@ -296,9 +395,6 @@ echo "==================================================="
 # Fixed config values
 TABLE_NAME="${TABLE_NAME:-orders}"
 DB_NAME="throughput_bench"
-INSERTS_PER_BRANCH=0
-UPDATES_PER_BRANCH=0
-DELETES_PER_BRANCH=0
 RANGE_SIZE=100
 SHAPE_UPPER="FAN_OUT"
 
@@ -310,9 +406,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Extract first 4 chars of sql_dump filename for run_id
-SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
-SQL_PREFIX=${SQL_BASENAME:0:4}
+# Data tag for run_id: first 4 chars of the dump name, or chw<W> for generated data
+if [ -n "$SQL_DUMP_PATH" ]; then
+    SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
+    SQL_PREFIX=${SQL_BASENAME:0:4}
+    DB_SOURCE_BLOCK="  sql_dump {
+    sql_dump_path: \"${SQL_DUMP_PATH}\"
+  }"
+else
+    SQL_PREFIX="chw${GENERATED_SCALE}"
+    DB_SOURCE_BLOCK="  generated {
+    scale_factor: ${GENERATED_SCALE}
+    seed_db: \"${SEED_DB}\"
+  }"
+fi
 
 # get_num_ops OPERATION NUM_THREADS
 # Default number of timed operations per thread.
@@ -321,7 +428,7 @@ get_num_ops() {
     local num_threads=$2
     case $op in
         BRANCH_CREATE)
-            echo 1
+            echo "$BRANCH_CREATE_OPS"
             ;;
         BRANCH_CONNECT)
             # Scale connect ops with the number of threads (2x)
@@ -381,11 +488,12 @@ run_config() {
     echo ""
     echo "==================================================="
     echo "Configuration: $num_threads threads, $num_branches branches, $concurrent_requests concurrent requests ($MODE)"
-    # Each thread works on the first branch assigned to it (round-robin).
+    # Each thread works on the first setup branch assigned to it (round-robin
+    # over the setup branches; the root branch gets no load).
     if [ "$num_branches" -eq 0 ]; then
         echo "Distribution: no setup branches; all threads work on the root branch"
     elif [ "$num_threads" -lt "$num_branches" ]; then
-        echo "Distribution: one thread per branch on $num_threads branches; the other $((num_branches - num_threads)) branches get no load"
+        echo "Distribution: one thread per branch on $num_threads branches; the other $((num_branches - num_threads)) branches exist but get no load"
     elif [ "$num_threads" -eq "$num_branches" ]; then
         echo "Distribution: one thread per branch"
     else
@@ -416,13 +524,9 @@ run_config() {
             warmup_ops=$(awk "BEGIN {print int($num_ops * $WARMUP_FRACTION)}")
         fi
 
-        # For BRANCH_CREATE, num_branches in setup should be 0
-        # For all other operations, setup num_branches matches the target
-        if [ "$operation" = "BRANCH_CREATE" ]; then
-            setup_num_branches=0
-        else
-            setup_num_branches=$num_branches
-        fi
+        # Every operation, BRANCH_CREATE included, runs after the N-branch
+        # setup: a BRANCH_CREATE run times further creations on top of N.
+        setup_num_branches=$num_branches
 
         echo ""
         echo "---------------------------------------------------"
@@ -442,15 +546,15 @@ scale_factor: 1
 database_setup {
   db_name: "${DB_NAME}"
   cleanup: true
-  sql_dump {
-    sql_dump_path: "${SQL_DUMP_PATH}"
-  }
+${DB_SOURCE_BLOCK}
 }
 
 num_threads: ${num_threads}
 measure_storage: false
 concurrent_requests: ${concurrent_requests}
 use_async: ${USE_ASYNC}
+num_processes: ${PROCESSES}
+${BACKGROUND_BLOCK}
 
 operation_benchmark {
   operation: ${operation}
@@ -463,6 +567,11 @@ operation_benchmark {
     inserts_per_branch: ${INSERTS_PER_BRANCH}
     updates_per_branch: ${UPDATES_PER_BRANCH}
     deletes_per_branch: ${DELETES_PER_BRANCH}
+    setup_parallelism: ${SETUP_PARALLELISM}
+  }
+
+  branch_op_config {
+    connect_every: ${BRANCH_CREATE_CONNECT_EVERY}
   }
 
   range_config {
@@ -489,6 +598,10 @@ if [ "$SWEEP_MODE" = "concurrency" ]; then
 elif [ "$SWEEP_MODE" = "proportional" ]; then
     for branches in "${BRANCH_COUNTS[@]}"; do
         run_config "$((branches * THREADS_PER_BRANCH))" "$branches" "$CONCURRENT_REQUESTS"
+    done
+elif [ "$SWEEP_MODE" = "threads" ]; then
+    for threads in "${THREAD_COUNTS[@]}"; do
+        run_config "$threads" "$FIXED_BRANCHES" "$CONCURRENT_REQUESTS"
     done
 else
     for branches in "${BRANCH_COUNTS[@]}"; do

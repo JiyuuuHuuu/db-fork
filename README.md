@@ -374,7 +374,35 @@ keys. A verb the backend lacks is recorded as `UNSUPPORTED`.
 
 # Run with custom range size
 ./scripts/run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16 --operations RANGE_UPDATE --range-size 500
+
+# No SQL dump: generate CH-benCHmark data (W=1, foreign keys skipped) in the
+# server; each setup branch gets 100 untimed updates so branches diverge
+./scripts/run_single_thread_bench.sh dolt_mysql 1,4,16,64,256,1024 --table-name stock \
+    --updates-per-branch 100 --operations READ,RANGE_READ,INSERT,UPDATE,RANGE_UPDATE
 ```
+
+##### Generated data and branch divergence
+
+Without a SQL dump path the database is seeded with the macrobench's
+CH-benCHmark generators (`database_setup.generated`, `--generated-scale W`,
+default W=1, about 600k rows) and committed as `base`. On Dolt backends
+`--seed-db NAME` seeds NAME once and then copies its tables server-side
+(`INSERT ... SELECT` from `NAME/main`) into every run's database instead of
+regenerating them. `--inserts-per-branch`, `--updates-per-branch` and
+`--deletes-per-branch` run that many untimed data ops on every setup branch
+right after it is created, so the branches hold distinct data; without them
+all N branches point at the same commit. A `BRANCH_CREATE` run creates its
+branches after the N-branch setup (`--branch-create-ops`, default 10), so a
+branch-count sweep measures creation on top of N existing branches.
+
+Every result row carries `branch_count`: in `<run_id>_setup.parquet` the
+branches that existed before that create (and after it, on the CONNECT
+row), in the main parquet the number of setup branches (BRANCH_CREATE rows:
+the live count before each create). The summary JSON adds `latency`
+(n/mean/p50/p95/p99/max of the verb or EXEC rows under `ops` and of the SQL
+statements under `statements`), `loaded_branches` and `data_source`.
+The Dolt branch-scaling study in `experiment/1-dolt-branch-scaling/` is built on these flags; its
+scripts, data, figures and report live in that directory.
 
 #### Output Files
 
@@ -411,6 +439,27 @@ Use `scripts/run_throughput_bench.sh` with one of three sweep modes:
 # Sweep proportionally (vary both threads and branches together)
 ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-proportional [OPTIONS]
 ```
+
+Without a SQL dump the data is generated (see
+[Generated data and branch divergence](#generated-data-and-branch-divergence);
+the same `--generated-scale`, `--seed-db` and `--*-per-branch` flags apply).
+Load goes to the setup branches only: with T threads and N branches,
+min(T, N) branches are loaded (round-robin), the rest exist idle, and the
+root branch gets no load.
+
+- `--processes P` spreads the client threads over P processes. One Python
+  process saturates at a few thousand operations per second (the GIL), far
+  below what Dolt serves; with several, the parent does the setup and the
+  processes start their timed operations together behind one barrier.
+- `--background-op OP` keeps every setup branch busy: one extra client per
+  branch runs OP (for example `MIXED`, 80% point reads and 20% point
+  updates) from before the measured clients start until they finish. Its
+  rows carry thread ids from T up and are summarised under `background`.
+- `--sweep-threads --branches B --thread-list ...` varies the clients on a
+  fixed number of branches.
+- Each summary also records `server_cpu_cores` (when `DBFORK_SERVER_PID`
+  names a server process on the same machine) and `client_cpu_cores`, the
+  average busy cores over the timed window.
 
 The script runs in **async mode** by default: each thread keeps
 `--concurrent-requests` ops in flight, each on its own pooled connection

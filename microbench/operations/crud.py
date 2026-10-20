@@ -86,9 +86,7 @@ class InsertOperation(Operation):
         Returns:
             Tuple of (sql_query, col_names, pk_columns)
         """
-        col_names = dbh.get_all_columns(
-            context.db_tools.get_current_connection(), self.table_name
-        )
+        col_names = context.get_all_columns(self.table_name)
         pk_columns = context.get_pk_columns(self.table_name)
 
         placeholders = ", ".join([f"%({name})s" for name in col_names])
@@ -177,9 +175,7 @@ class UpdateOperation(Operation):
 
         # Get column information
         pk_columns = context.get_pk_columns(self.table_name)
-        all_columns = dbh.get_all_columns(
-            context.db_tools.get_current_connection(), self.table_name
-        )
+        all_columns = context.get_all_columns(self.table_name)
         non_pk_columns = [col for col in all_columns if col not in pk_columns]
 
         if not non_pk_columns:
@@ -366,9 +362,7 @@ class RangeUpdateOperation(Operation):
 
         # Get column information
         pk_columns = context.get_pk_columns(self.table_name)
-        all_columns = dbh.get_all_columns(
-            context.db_tools.get_current_connection(), self.table_name
-        )
+        all_columns = context.get_all_columns(self.table_name)
         non_pk_columns = [col for col in all_columns if col not in pk_columns]
 
         if not non_pk_columns:
@@ -417,3 +411,29 @@ class RangeUpdateOperation(Operation):
 
     def get_operation_type(self) -> rslt.OpType:
         return rslt.OpType.UPDATE
+
+
+class MixedOperation(Operation):
+    """A busy branch's workload: point reads with probability read_fraction,
+    point updates otherwise (rows are recorded as READ and UPDATE)."""
+
+    def __init__(self, table_name: str, read_fraction: float = 0.8):
+        self.table_name = table_name
+        self.read_fraction = read_fraction
+        self._read = ReadOperation(table_name)
+        self._update = UpdateOperation(table_name)
+
+    def _pick(self, context: 'WorkerContext') -> Operation:
+        return self._read if context.rnd.random() < self.read_fraction else self._update
+
+    def execute(self, context: 'WorkerContext') -> None:
+        self._pick(context).execute(context)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        await self._pick(context).execute_async(context)
+
+    def requires_setup_data(self) -> bool:
+        return True
+
+    def get_operation_type(self) -> rslt.OpType:
+        return rslt.OpType.READ

@@ -1,14 +1,24 @@
 #!/bin/bash
 # run_single_thread_bench.sh - Single-threaded benchmark script using runner2.py
 #
-# Usage: ./scripts/run_single_thread_bench.sh <backend> <sql_dump_path> <branch_counts> [OPTIONS]
+# Usage: ./scripts/run_single_thread_bench.sh <backend> [<sql_dump_path>] <branch_counts> [OPTIONS]
 #
 # Required Arguments:
 #   backend:        dolt, dolt_mysql, seekdb, neon, xata, file_copy
-#   sql_dump_path:  Path to SQL dump file (e.g., schemas/tpcc_mini.sql)
+#   sql_dump_path:  Path to SQL dump file (e.g., schemas/tpcc_mini.sql); without
+#                   one, CH-benCHmark data is generated in the server at
+#                   --generated-scale W (foreign keys skipped)
 #   branch_counts:  Comma-separated list of branch counts (e.g., 8,16,32) or single value (e.g., 16)
 #
 # Options:
+#   --generated-scale <W>  W warehouses of generated CH data (default 1; no SQL dump)
+#   --seed-db <name>      Dolt only: copy the generated data from this database,
+#                         generated once on first use, instead of regenerating per run
+#   --inserts-per-branch <n>, --updates-per-branch <n>, --deletes-per-branch <n>
+#                         untimed data ops on every setup branch (default 0), so
+#                         branches diverge from their parent
+#   --branch-create-ops <n> timed creations per BRANCH_CREATE run after the
+#                         N-branch setup (default 10)
 #   --seed <seed>         Random seed for reproducibility
 #   --shape <shape>       Branch tree shape: spine, bushy, or fan_out (default: spine)
 #   --measure-storage     Measure disk size before/after each update
@@ -39,6 +49,13 @@ OUTPUT_DIR="./run_stats"
 RANGE_SIZE=200
 TABLE_NAME=""
 BACKFILL_FRACTION=1.0
+GENERATED_SCALE=""
+SEED_DB=""
+INSERTS_PER_BRANCH=0
+UPDATES_PER_BRANCH=0
+DELETES_PER_BRANCH=0
+BRANCH_CREATE_OPS=10
+POSITIONALS=()
 
 
 while [[ $# -gt 0 ]]; do
@@ -79,32 +96,69 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
+        --sql-dump)
+            SQL_DUMP_PATH="$2"
+            shift 2
+            ;;
+        --generated-scale)
+            GENERATED_SCALE="$2"
+            shift 2
+            ;;
+        --seed-db)
+            SEED_DB="$2"
+            shift 2
+            ;;
+        --inserts-per-branch)
+            INSERTS_PER_BRANCH="$2"
+            shift 2
+            ;;
+        --updates-per-branch)
+            UPDATES_PER_BRANCH="$2"
+            shift 2
+            ;;
+        --deletes-per-branch)
+            DELETES_PER_BRANCH="$2"
+            shift 2
+            ;;
+        --branch-create-ops)
+            BRANCH_CREATE_OPS="$2"
+            shift 2
+            ;;
+        -*)
+            echo "Error: Unknown option '$1'"
+            exit 1
+            ;;
         *)
-            if [ -z "$BACKEND" ]; then
-                BACKEND="$1"
-            elif [ -z "$SQL_DUMP_PATH" ]; then
-                SQL_DUMP_PATH="$1"
-            elif [ -z "$NUM_BRANCHES" ]; then
-                NUM_BRANCHES="$1"
-            else
-                echo "Error: Unexpected argument '$1'"
-                exit 1
-            fi
+            POSITIONALS+=("$1")
             shift
             ;;
     esac
 done
 
+# Positionals: <backend> <branch_counts>, or <backend> <sql_dump_path> <branch_counts>
+case ${#POSITIONALS[@]} in
+    2) BACKEND="${POSITIONALS[0]}"; NUM_BRANCHES="${POSITIONALS[1]}" ;;
+    3) BACKEND="${POSITIONALS[0]}"; SQL_DUMP_PATH="${POSITIONALS[1]}"; NUM_BRANCHES="${POSITIONALS[2]}" ;;
+    *) BACKEND=""; NUM_BRANCHES="" ;;
+esac
+if [ -z "$SQL_DUMP_PATH" ] && [ -z "$GENERATED_SCALE" ]; then
+    GENERATED_SCALE=1
+fi
+
 # Validate required arguments
-if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$NUM_BRANCHES" ]; then
-    echo "Usage: $0 <backend> <sql_dump_path> <branch_counts> [options]"
+if [ -z "$BACKEND" ] || [ -z "$NUM_BRANCHES" ]; then
+    echo "Usage: $0 <backend> [<sql_dump_path>] <branch_counts> [options]"
     echo ""
     echo "Required:"
     echo "  backend: dolt, dolt_mysql, seekdb, neon, xata, file_copy"
-    echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
+    echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql); omit to generate CH data"
     echo "  branch_counts: Comma-separated list of branch counts (e.g., 8,16,32) or single value (e.g., 16)"
     echo ""
     echo "Options:"
+    echo "  --generated-scale <W>: generate CH-benCHmark data at W warehouses (default 1 without a dump)"
+    echo "  --seed-db <name>: Dolt only; copy the generated data from this database (generated once)"
+    echo "  --inserts-per-branch/--updates-per-branch/--deletes-per-branch <n>: untimed data ops per setup branch"
+    echo "  --branch-create-ops <n>: timed creations per BRANCH_CREATE run (default 10)"
     echo "  --seed <seed>: Random seed for reproducibility (default: random)"
     echo "  --shape <shape>: Branch tree shape: spine, bushy, or fan_out (default: spine)"
     echo "  --measure-storage: Measure disk_size_before/after for each update"
@@ -138,9 +192,13 @@ if [[ ! "$SHAPE_UPPER" =~ ^(SPINE|BUSHY|FAN_OUT)$ ]]; then
     exit 1
 fi
 
-# Check if SQL dump file exists
-if [ ! -f "$SQL_DUMP_PATH" ]; then
+# Check if SQL dump file exists (when one is used)
+if [ -n "$SQL_DUMP_PATH" ] && [ ! -f "$SQL_DUMP_PATH" ]; then
     echo "Error: SQL dump file not found: $SQL_DUMP_PATH"
+    exit 1
+fi
+if [ -n "$SEED_DB" ] && [[ ! "$BACKEND" =~ ^(dolt|dolt_mysql)$ ]]; then
+    echo "Error: --seed-db is supported on dolt and dolt_mysql only"
     exit 1
 fi
 
@@ -163,9 +221,6 @@ IFS=',' read -ra BRANCH_COUNTS <<< "$NUM_BRANCHES"
 # Other fixed config values
 TABLE_NAME="${TABLE_NAME:-orders}"
 DB_NAME="microbench"
-INSERTS_PER_BRANCH=0
-UPDATES_PER_BRANCH=0
-DELETES_PER_BRANCH=0
 
 # Create temporary config file
 TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_bench_config_XXXXXX)
@@ -175,16 +230,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Extract first 4 chars of sql_dump filename for run_id
-SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
-SQL_PREFIX=${SQL_BASENAME:0:4}
+# Data tag for run_id: first 4 chars of the dump name, or chw<W> for generated data
+if [ -n "$SQL_DUMP_PATH" ]; then
+    SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
+    SQL_PREFIX=${SQL_BASENAME:0:4}
+    DB_SOURCE_BLOCK="  sql_dump {
+    sql_dump_path: \"${SQL_DUMP_PATH}\"
+  }"
+else
+    SQL_PREFIX="chw${GENERATED_SCALE}"
+    DB_SOURCE_BLOCK="  generated {
+    scale_factor: ${GENERATED_SCALE}
+    seed_db: \"${SEED_DB}\"
+  }"
+fi
 
 # Function to get num_ops based on operation type
 get_num_ops() {
     local op=$1
     case $op in
         BRANCH_CREATE|BRANCH_DELETE)
-            echo 1
+            echo "$BRANCH_CREATE_OPS"
             ;;
         RANGE_UPDATE)
             echo 200
@@ -207,7 +273,8 @@ get_num_ops() {
 echo "==================================================="
 echo "Single-Threaded Microbenchmark (runner2.py)"
 echo "Backend: $BACKEND"
-echo "SQL Dump: $SQL_DUMP_PATH"
+echo "Data: ${SQL_DUMP_PATH:-generated CH-benCHmark W=$GENERATED_SCALE${SEED_DB:+ (copied from $SEED_DB)}}"
+echo "Per setup branch: $INSERTS_PER_BRANCH inserts, $UPDATES_PER_BRANCH updates, $DELETES_PER_BRANCH deletes"
 echo "Operations: ${OPERATIONS[*]}"
 echo "Branch Counts: ${BRANCH_COUNTS[*]}"
 echo "Branch Shape: $SHAPE"
@@ -232,13 +299,9 @@ for OPERATION in "${OPERATIONS[@]}"; do
         SHAPE_LOWER=$(echo "$SHAPE" | tr '[:upper:]' '[:lower:]')
         RUN_ID="${BACKEND}_${SQL_PREFIX}_${NUM_BRANCHES}_${SHAPE_LOWER}"
 
-        # For BRANCH_CREATE operation, num_branches in setup should be 0
-        # For all other operations, num_branches matches target
-        if [ "$OPERATION" = "BRANCH_CREATE" ]; then
-            SETUP_NUM_BRANCHES=0
-        else
-            SETUP_NUM_BRANCHES=$NUM_BRANCHES
-        fi
+        # Every operation, BRANCH_CREATE included, runs after the N-branch
+        # setup: a BRANCH_CREATE run times further creations on top of N.
+        SETUP_NUM_BRANCHES=$NUM_BRANCHES
 
         echo ""
         echo "---------------------------------------------------"
@@ -257,9 +320,7 @@ scale_factor: 1
 database_setup {
   db_name: "${DB_NAME}"
   cleanup: true
-  sql_dump {
-    sql_dump_path: "${SQL_DUMP_PATH}"
-  }
+${DB_SOURCE_BLOCK}
 }
 
 num_threads: 1
