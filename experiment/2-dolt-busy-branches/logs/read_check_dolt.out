@@ -1,0 +1,9 @@
+{'backend': 'dolt', 'kind': 'point', 'busy_branches': 16, 'client_processes': 16, 'ops_per_s': 15487, 'p50_ms': 0.99, 'p95_ms': 1.48, 'server_cpu_cores': 13.0, 'client_cpu_cores': 5.6}
+{'backend': 'dolt', 'kind': 'point', 'busy_branches': 64, 'client_processes': 20, 'ops_per_s': 24190, 'p50_ms': 2.09, 'p95_ms': 6.09, 'server_cpu_cores': 19.8, 'client_cpu_cores': 5.6}
+{'backend': 'dolt', 'kind': 'point', 'busy_branches': 256, 'client_processes': 20, 'ops_per_s': 23629, 'p50_ms': 6.29, 'p95_ms': 35.82, 'server_cpu_cores': 19.8, 'client_cpu_cores': 5.4}
+{'backend': 'dolt', 'kind': 'point', 'busy_branches': 1024, 'client_processes': 20, 'ops_per_s': 21851, 'p50_ms': 34.45, 'p95_ms': 125.93, 'server_cpu_cores': 19.7, 'client_cpu_cores': 5.0}
+{'backend': 'dolt', 'kind': 'range', 'busy_branches': 16, 'client_processes': 16, 'ops_per_s': 5694, 'p50_ms': 2.62, 'p95_ms': 4.19, 'server_cpu_cores': 14.2, 'client_cpu_cores': 5.5}
+{'backend': 'dolt', 'kind': 'range', 'busy_branches': 64, 'client_processes': 20, 'ops_per_s': 7149, 'p50_ms': 7.01, 'p95_ms': 18.43, 'server_cpu_cores': 19.7, 'client_cpu_cores': 5.6}
+{'backend': 'dolt', 'kind': 'range', 'busy_branches': 256, 'client_processes': 20, 'ops_per_s': 6675, 'p50_ms': 19.24, 'p95_ms': 154.8, 'server_cpu_cores': 19.3, 'client_cpu_cores': 5.3}
+{'backend': 'dolt', 'kind': 'range', 'busy_branches': 1024, 'client_processes': 20, 'ops_per_s': 6160, 'p50_ms': 134.27, 'p95_ms': 457.69, 'server_cpu_cores': 19.1, 'client_cpu_cores': 4.9}
+wrote experiment/2-dolt-busy-branches/data/dolt/read_check.csv

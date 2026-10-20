@@ -1,0 +1,28 @@
+2026-10-18T03:05:09Z === busy-branches study: backend=dolt smoke=true phases=data_ops,branch_create ns=1,4,64 server_pid=10398 client_procs<=20 host=node1.branchdb.rasl-pg0.wisc.cloudlab.us
+2026-10-18T03:05:09Z START data_READ_n1
+2026-10-18T03:05:30Z DONE  data_READ_n1 (21s)
+2026-10-18T03:05:30Z START data_UPDATE_n1
+2026-10-18T03:05:45Z DONE  data_UPDATE_n1 (15s)
+2026-10-18T03:05:45Z START create_n1
+2026-10-18T03:05:57Z DONE  create_n1 (12s)
+2026-10-18T03:05:57Z START data_READ_n4
+2026-10-18T03:06:13Z DONE  data_READ_n4 (16s)
+2026-10-18T03:06:13Z START data_UPDATE_n4
+2026-10-18T03:06:28Z DONE  data_UPDATE_n4 (15s)
+2026-10-18T03:06:28Z START create_n4
+2026-10-18T03:06:42Z DONE  create_n4 (14s)
+2026-10-18T03:06:42Z START data_READ_n64
+2026-10-18T03:07:34Z DONE  data_READ_n64 (52s)
+2026-10-18T03:07:34Z START data_UPDATE_n64
+2026-10-18T03:08:27Z DONE  data_UPDATE_n64 (53s)
+2026-10-18T03:08:27Z START create_n64
+2026-10-18T03:09:18Z DONE  create_n64 (51s)
+2026-10-18T03:09:18Z === study done
+2026-10-18T03:11:36Z === busy-branches study: backend=dolt smoke=true phases=branch_create ns=1,4,64 server_pid=10398 client_procs<=20 host=node1.branchdb.rasl-pg0.wisc.cloudlab.us
+2026-10-18T03:11:36Z START create_n1
+2026-10-18T03:11:51Z DONE  create_n1 (15s)
+2026-10-18T03:11:51Z START create_n4
+2026-10-18T03:12:06Z DONE  create_n4 (15s)
+2026-10-18T03:12:06Z START create_n64
+2026-10-18T03:13:00Z DONE  create_n64 (54s)
+2026-10-18T03:13:00Z === study done

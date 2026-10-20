@@ -1,0 +1,9 @@
+{'backend': 'dolt_mysql', 'kind': 'point', 'busy_branches': 16, 'client_processes': 16, 'ops_per_s': 8503, 'p50_ms': 1.87, 'p95_ms': 2.49, 'server_cpu_cores': 7.2, 'client_cpu_cores': 8.7}
+{'backend': 'dolt_mysql', 'kind': 'point', 'busy_branches': 64, 'client_processes': 20, 'ops_per_s': 39116, 'p50_ms': 1.47, 'p95_ms': 2.23, 'server_cpu_cores': 15.5, 'client_cpu_cores': 18.8}
+{'backend': 'dolt_mysql', 'kind': 'point', 'busy_branches': 256, 'client_processes': 20, 'ops_per_s': 40644, 'p50_ms': 5.95, 'p95_ms': 9.93, 'server_cpu_cores': 17.0, 'client_cpu_cores': 18.7}
+{'backend': 'dolt_mysql', 'kind': 'point', 'busy_branches': 1024, 'client_processes': 20, 'ops_per_s': 40273, 'p50_ms': 23.02, 'p95_ms': 63.52, 'server_cpu_cores': 18.2, 'client_cpu_cores': 18.6}
+{'backend': 'dolt_mysql', 'kind': 'range', 'busy_branches': 16, 'client_processes': 16, 'ops_per_s': 3097, 'p50_ms': 5.15, 'p95_ms': 6.41, 'server_cpu_cores': 7.1, 'client_cpu_cores': 10.8}
+{'backend': 'dolt_mysql', 'kind': 'range', 'busy_branches': 64, 'client_processes': 20, 'ops_per_s': 6052, 'p50_ms': 9.89, 'p95_ms': 13.25, 'server_cpu_cores': 9.6, 'client_cpu_cores': 19.9}
+{'backend': 'dolt_mysql', 'kind': 'range', 'busy_branches': 256, 'client_processes': 20, 'ops_per_s': 6128, 'p50_ms': 42.15, 'p95_ms': 42.89, 'server_cpu_cores': 9.3, 'client_cpu_cores': 20.0}
+{'backend': 'dolt_mysql', 'kind': 'range', 'busy_branches': 1024, 'client_processes': 20, 'ops_per_s': 6035, 'p50_ms': 168.77, 'p95_ms': 174.8, 'server_cpu_cores': 9.1, 'client_cpu_cores': 20.1}
+wrote experiment/2-dolt-busy-branches/data/dolt_mysql/read_check.csv
