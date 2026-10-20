@@ -1,0 +1,42 @@
+tenant 11ab575732c74a9aa664bf25aab43f0e, seed timeline 1de3797257794e39b9dce823f3a629ad
+seed compute 10.10.1.8:20000 up in 382 ms
+Seeding CH-benCHmark at W=1...
+  seeded       region:         5 rows
+  seeded       nation:        25 rows
+  seeded     supplier:    10,000 rows
+  seeded    warehouse:         1 rows
+  seeded     district:        10 rows
+  seeded         item:   100,000 rows
+  seeded     customer:    30,000 rows
+  seeded      history:    30,000 rows
+  seeded        stock:   100,000 rows
+  seeded       orders:    30,000 rows
+  seeded    new_order:     9,000 rows
+  seeded   order_line:   299,394 rows
+Data ready: 608,435 rows in 54.9s
+{
+  "tenant_id": "11ab575732c74a9aa664bf25aab43f0e",
+  "seed_timeline_id": "1de3797257794e39b9dce823f3a629ad",
+  "seed": {
+    "source": "generated",
+    "scale_factor": 1,
+    "rows": {
+      "region": 5,
+      "nation": 25,
+      "supplier": 10000,
+      "warehouse": 1,
+      "district": 10,
+      "item": 100000,
+      "customer": 30000,
+      "history": 30000,
+      "stock": 100000,
+      "orders": 30000,
+      "new_order": 9000,
+      "order_line": 299394
+    },
+    "seed_db": null,
+    "seed_db_created": false,
+    "seed_sec": 54.9
+  },
+  "seconds": 58.1
+}

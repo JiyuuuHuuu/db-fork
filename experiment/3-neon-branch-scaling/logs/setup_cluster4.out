@@ -1,0 +1,24 @@
+== binaries
+== per-node setup (SSD, configs, units)
+  node1:node1,compute ok (444G free on /mnt/ssd)
+  node2:node2,pageserver ok (444G free on /mnt/ssd)
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+  node3:node3,control,safekeeper ok (444G free on /mnt/ssd)
+  node4:node4,safekeeper ok (444G free on /mnt/ssd)
+  node5:node5,safekeeper ok (444G free on /mnt/ssd)
+  node6:node6,compute ok (444G free on /mnt/ssd)
+  node7:node7,compute ok (444G free on /mnt/ssd)
+== stop Dolt and Doltgres (the client node and a compute node ran them in experiments 1-2)
+== start services
+null[{"id":1,"availability":"Active","scheduling":"Active","availability_zone_id":"lan","listen_http_addr":"10.10.1.3","listen_http_port":9898,"listen_https_port":null,"listen_pg_addr":"10.10.1.3","listen_pg_port":64000,"listen_grpc_addr":null,"listen_grpc_port":null}]
+node1 agent: {"t": 1792429832.4679017, "proc_s": 0.0, "node_busy_s": 101694.34, "node_iowait_s": 1728.16, "ncpu": 40}
+node2 agent: {"t": 1792429832.7518065, "proc_s": 0.0, "node_busy_s": 727.0, "node_iowait_s": 1216.77, "ncpu": 40}
+node3 agent: {"t": 1792429833.0313303, "proc_s": 0.0, "node_busy_s": 876.52, "node_iowait_s": 1456.02, "ncpu": 40}
+node4 agent: {"t": 1792429833.3669581, "proc_s": 0.0, "node_busy_s": 724.01, "node_iowait_s": 1260.09, "ncpu": 40}
+node5 agent: {"t": 1792429833.6910207, "proc_s": 0.0, "node_busy_s": 784.29, "node_iowait_s": 1352.86, "ncpu": 40}
+node6 agent: {"t": 1792429833.9913766, "proc_s": 0.0, "node_busy_s": 702.51, "node_iowait_s": 1236.36, "ncpu": 40}
+node7 agent: {"t": 1792429834.271206, "proc_s": 0.0, "node_busy_s": 724.11, "node_iowait_s": 1252.63, "ncpu": 40}
+== client node: repo copy and venv
+  repo synced
+== done

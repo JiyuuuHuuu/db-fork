@@ -1,0 +1,7 @@
+# 2026-10-19 ~18:45-18:51 UTC, on node0: uv run python experiment/3-neon-branch-scaling/scripts/neon_ctl.py compact-seed
+# First invocation (compaction only, before bump_past_images existed):
+seed timeline layers after image compaction: {'Delta': 1, 'Image': 2} (15s)
+# Seed layers then: Delta 0/14E99A0-0/AE31DF9 (231 MB), Image @0/AE31DF9 (40.8 MB), Image @0/AE31DF9 (13.0 MB);
+# last_record_lsn 0/AE31DF8, below the images.
+# Second invocation (compaction again + bump past the images):
+seed timeline layers after image compaction: {'Delta': 1, 'Image': 2}; last_record_lsn now 0/AE31F00 (2s)

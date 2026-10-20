@@ -1,0 +1,12 @@
+2026-10-19T21:24:34Z === neon busy-branches study: smoke=false phases=data_ops ns=32 ops='READ' client_procs<=40 host=node0.branchdb.rasl-pg0.wisc.cloudlab.us
+2026-10-19T21:24:34Z START data_READ_n32
+2026-10-19T21:25:03Z DONE  data_READ_n32 (29s)
+2026-10-19T21:25:04Z === study done
+2026-10-19T21:25:04Z === neon busy-branches study: smoke=false phases=data_ops ns=64 ops='UPDATE' client_procs<=40 host=node0.branchdb.rasl-pg0.wisc.cloudlab.us
+2026-10-19T21:25:04Z START data_UPDATE_n64
+2026-10-19T21:26:09Z DONE  data_UPDATE_n64 (65s)
+2026-10-19T21:26:09Z === study done
+2026-10-19T21:26:09Z === neon busy-branches study: smoke=false phases=branch_create ns=1024 ops='READ RANGE_READ INSERT UPDATE' client_procs<=40 host=node0.branchdb.rasl-pg0.wisc.cloudlab.us
+2026-10-19T21:26:10Z START create_n1024
+2026-10-19T21:31:44Z DONE  create_n1024 (334s)
+2026-10-19T21:31:44Z === study done

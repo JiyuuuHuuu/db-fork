@@ -1,0 +1,16 @@
+== binaries
+  node5: safekeeper done
+  node4: safekeeper done
+  node1: compute_ctl done
+  node6: compute_ctl done
+  node7: compute_ctl done
+  node2: pageserver done
+  node3: storage_broker storage_controller storcon_cli safekeeper done
+== per-node setup (SSD, configs, units)
+  node1:compute ok (444G free on /mnt/ssd)
+  node2:pageserver ok (444G free on /mnt/ssd)
+bash: line 36: 10.10.1.4:5454,10.10.1.5:5454,10.10.1.6:5454: command not found
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+  node3:control ok (444G free on /mnt/ssd)
+  node4:safekeeper ok (444G free on /mnt/ssd)

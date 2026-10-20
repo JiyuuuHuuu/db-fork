@@ -1,0 +1,6 @@
+== binaries
+== per-node setup (SSD, configs, units)
+  node1:node1,compute ok (444G free on /mnt/ssd)
+  node2:node2,pageserver ok (444G free on /mnt/ssd)
+  node3:node3,control,safekeeper ok (444G free on /mnt/ssd)
+mkfs.xfs: cannot open /dev/sdc: Device or resource busy
