@@ -1,0 +1,92 @@
+== [dolt_mysql] packages, SSD, server on c220g2-010806.wisc.cloudlab.us
+/dev/sdc        447G  3.2G  444G   1% /mnt/ssd
+active
+dolt up on :3306
+== [dolt_mysql] driver repo + venv on c220g2-010806.wisc.cloudlab.us
+Using CPython 3.13.16
+Creating virtual environment at: .venv
+Resolved 52 packages in 3ms
+   Building db-fork @ file:///users/JiyuHu23/db-fork
+Downloading fonttools (5.1MiB)
+Downloading pyarrow (45.5MiB)
+Downloading numpy (15.9MiB)
+Downloading matplotlib (9.4MiB)
+Downloading pygments (1.2MiB)
+Downloading pillow (6.6MiB)
+Downloading faker (1.9MiB)
+Downloading psycopg2-binary (4.1MiB)
+Downloading scipy (33.7MiB)
+Downloading psycopg-binary (5.0MiB)
+Downloading duckdb (20.6MiB)
+Downloading kiwisolver (1.4MiB)
+Downloading pandas (11.7MiB)
+Downloading pydantic-core (2.0MiB)
+Downloading bauplan (31.3MiB)
+ Downloaded pygments
+ Downloaded kiwisolver
+ Downloaded faker
+ Downloaded pydantic-core
+ Downloaded psycopg2-binary
+ Downloaded psycopg-binary
+ Downloaded fonttools
+ Downloaded pillow
+ Downloaded matplotlib
+ Downloaded pandas
+ Downloaded numpy
+ Downloaded duckdb
+ Downloaded scipy
+      Built db-fork @ file:///users/JiyuHu23/db-fork
+ Downloaded pyarrow
+ Downloaded bauplan
+Prepared 47 packages in 4.34s
+Installed 47 packages in 975ms
+ + aiomysql==0.3.2
+ + annotated-types==0.8.0
+ + bauplan==0.3.4
+ + bauplan-sdk-types==0.2.1
+ + certifi==2026.7.22
+ + charset-normalizer==3.5.2
+ + contourpy==1.4.0
+ + cycler==0.12.1
+ + db-fork==0.1.0 (from file:///users/JiyuHu23/db-fork)
+ + duckdb==1.5.6
+ + faker==37.12.0
+ + fonttools==4.66.1
+ + idna==3.20
+ + iniconfig==2.3.1
+ + kiwisolver==1.5.1
+ + matplotlib==3.11.2
+ + neon-api==0.3.0
+ + numpy==2.5.3
+ + packaging==25.0
+ + pandas==2.3.3
+ + pillow==12.3.0
+ + pluggy==1.6.0
+ + protobuf==6.33.6
+ + psycopg==3.3.6
+ + psycopg-binary==3.3.6
+ + psycopg-pool==3.3.3
+ + psycopg2-binary==2.9.13
+ + pyarrow==22.0.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pygments==2.21.0
+ + pymysql==1.2.3
+ + pyparsing==3.3.3
+ + pytest==9.1.1
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + pytz==2026.4
+ + requests==2.34.2
+ + scipy==1.18.1
+ + setuptools==84.0.0
+ + six==1.17.0
+ + sqlglot==30.22.0
+ + tqdm==4.70.1
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tzdata==2026.4
+ + urllib3==2.8.0
+dolt_mysql reachable
+driver venv ok on node0.branchdb.rasl-pg0.wisc.cloudlab.us
+== [dolt_mysql] done on c220g2-010806.wisc.cloudlab.us

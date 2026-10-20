@@ -1,0 +1,16 @@
+create done
+dolt       update procs   same     clients= 1 inflight/client=1 ops/s=    229 p50=   4.29ms p95=   4.76ms errors=0
+dolt       update procs   same     clients= 1 inflight/client=4 ops/s=    160 p50=  24.70ms p95=  26.40ms errors=0
+dolt       update procs   same     clients= 2 inflight/client=4 ops/s=    155 p50=  49.90ms p95=  57.40ms errors=0
+dolt       update procs   same     clients= 4 inflight/client=4 ops/s=    155 p50= 104.07ms p95= 109.94ms errors=0
+dolt       update procs   same     clients= 8 inflight/client=4 ops/s=    158 p50= 201.71ms p95= 212.24ms errors=0
+dolt       update procs   same     clients=16 inflight/client=4 ops/s=    163 p50= 399.94ms p95= 417.78ms errors=0
+dolt       update procs   same     clients=32 inflight/client=4 ops/s=    166 p50= 798.32ms p95= 872.28ms errors=0
+dolt       update procs   distinct clients= 1 inflight/client=4 ops/s=    160 p50=  24.75ms p95=  26.26ms errors=0
+dolt       update procs   distinct clients= 2 inflight/client=4 ops/s=    244 p50=  32.66ms p95=  36.32ms errors=0
+dolt       update procs   distinct clients= 4 inflight/client=4 ops/s=    309 p50=  50.29ms p95=  56.65ms errors=0
+dolt       update procs   distinct clients= 8 inflight/client=4 ops/s=    357 p50=  89.05ms p95= 101.25ms errors=0
+dolt       update procs   distinct clients=16 inflight/client=4 ops/s=    359 p50= 177.29ms p95= 209.14ms errors=0
+dolt       update procs   distinct clients=32 inflight/client=4 ops/s=    349 p50= 365.46ms p95= 448.53ms errors=0
+delete done
+write calibration done

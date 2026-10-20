@@ -212,6 +212,17 @@ __marimo__/
 # Experiment data (parquet files are compressed into zip for version control)
 experiments/*/results/data/*.parquet
 
+# Experiments (experiment/<n>-<name>/): only the high-level record goes to git:
+# the Markdown files (README, plan, report, REPRODUCE), the PNG plots and the
+# logs. Raw data, figure tables, scripts, configs and code patches stay on disk.
+experiment/*/*
+!experiment/*/*.md
+!experiment/*/figures/
+experiment/*/figures/*
+!experiment/*/figures/*.png
+!experiment/*/logs/
+!experiment/*/logs/**
+
 # Potentially large DB setup files.
 db_setup/*.sql
 db_setup/BIRD-Critic-sol

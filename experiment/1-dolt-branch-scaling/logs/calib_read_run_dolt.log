@@ -1,0 +1,51 @@
+create done
+dolt       point threads same     clients= 1 inflight/client=4 ops/s=   2948 p50=   1.33ms p95=   1.60ms errors=0
+dolt       point threads same     clients= 2 inflight/client=4 ops/s=   4525 p50=   1.77ms p95=   2.26ms errors=0
+dolt       point threads same     clients= 4 inflight/client=4 ops/s=   4075 p50=   3.22ms p95=   7.57ms errors=0
+dolt       point threads same     clients= 8 inflight/client=4 ops/s=   2986 p50=   9.81ms p95=  18.40ms errors=0
+dolt       point threads same     clients=16 inflight/client=4 ops/s=   4476 p50=  12.80ms p95=  27.14ms errors=0
+dolt       point threads same     clients=32 inflight/client=4 ops/s=   5277 p50=  23.03ms p95=  38.93ms errors=0
+dolt       point threads distinct clients= 1 inflight/client=4 ops/s=   2600 p50=   1.54ms p95=   1.80ms errors=0
+dolt       point threads distinct clients= 2 inflight/client=4 ops/s=   4360 p50=   1.69ms p95=   2.79ms errors=0
+dolt       point threads distinct clients= 4 inflight/client=4 ops/s=   3663 p50=   3.45ms p95=   8.32ms errors=0
+dolt       point threads distinct clients= 8 inflight/client=4 ops/s=   2892 p50=  10.40ms p95=  19.15ms errors=0
+dolt       point threads distinct clients=16 inflight/client=4 ops/s=   4696 p50=  12.31ms p95=  24.99ms errors=0
+dolt       point threads distinct clients=32 inflight/client=4 ops/s=   5295 p50=  22.84ms p95=  39.18ms errors=0
+dolt       point procs   same     clients= 1 inflight/client=4 ops/s=   3095 p50=   1.28ms p95=   1.52ms errors=0
+dolt       point procs   same     clients= 2 inflight/client=4 ops/s=   7108 p50=   1.11ms p95=   1.48ms errors=0
+dolt       point procs   same     clients= 4 inflight/client=4 ops/s=  19922 p50=   0.73ms p95=   1.32ms errors=0
+dolt       point procs   same     clients= 8 inflight/client=4 ops/s=  26120 p50=   0.98ms p95=   2.57ms errors=0
+dolt       point procs   same     clients=16 inflight/client=4 ops/s=  26662 p50=   1.92ms p95=   5.76ms errors=0
+dolt       point procs   same     clients=32 inflight/client=4 ops/s=  26410 p50=   3.40ms p95=  13.52ms errors=0
+dolt       point procs   distinct clients= 1 inflight/client=4 ops/s=   2589 p50=   1.55ms p95=   1.82ms errors=0
+dolt       point procs   distinct clients= 2 inflight/client=4 ops/s=   6096 p50=   1.30ms p95=   1.81ms errors=0
+dolt       point procs   distinct clients= 4 inflight/client=4 ops/s=  17641 p50=   0.82ms p95=   1.52ms errors=0
+dolt       point procs   distinct clients= 8 inflight/client=4 ops/s=  22379 p50=   1.15ms p95=   3.05ms errors=0
+dolt       point procs   distinct clients=16 inflight/client=4 ops/s=  22894 p50=   2.23ms p95=   6.81ms errors=0
+dolt       point procs   distinct clients=32 inflight/client=4 ops/s=  22785 p50=   3.90ms p95=  16.01ms errors=0
+dolt       range threads same     clients= 1 inflight/client=4 ops/s=    967 p50=   3.90ms p95=   5.58ms errors=0
+dolt       range threads same     clients= 2 inflight/client=4 ops/s=   1272 p50=   6.25ms p95=   8.11ms errors=0
+dolt       range threads same     clients= 4 inflight/client=4 ops/s=    870 p50=  19.24ms p95=  27.76ms errors=0
+dolt       range threads same     clients= 8 inflight/client=4 ops/s=    765 p50=  40.84ms p95=  60.50ms errors=0
+dolt       range threads same     clients=16 inflight/client=4 ops/s=   1054 p50=  56.54ms p95=  98.34ms errors=0
+dolt       range threads same     clients=32 inflight/client=4 ops/s=   1289 p50=  97.03ms p95= 134.35ms errors=0
+dolt       range threads distinct clients= 1 inflight/client=4 ops/s=    993 p50=   3.85ms p95=   5.41ms errors=0
+dolt       range threads distinct clients= 2 inflight/client=4 ops/s=   1316 p50=   6.15ms p95=   7.56ms errors=0
+dolt       range threads distinct clients= 4 inflight/client=4 ops/s=   1209 p50=  10.76ms p95=  26.51ms errors=0
+dolt       range threads distinct clients= 8 inflight/client=4 ops/s=    700 p50=  45.91ms p95=  64.68ms errors=0
+dolt       range threads distinct clients=16 inflight/client=4 ops/s=   1108 p50=  54.08ms p95=  92.36ms errors=0
+dolt       range threads distinct clients=32 inflight/client=4 ops/s=   1284 p50=  97.25ms p95= 136.64ms errors=0
+dolt       range procs   same     clients= 1 inflight/client=4 ops/s=   1007 p50=   3.77ms p95=   5.34ms errors=0
+dolt       range procs   same     clients= 2 inflight/client=4 ops/s=   1720 p50=   4.59ms p95=   6.15ms errors=0
+dolt       range procs   same     clients= 4 inflight/client=4 ops/s=   3954 p50=   3.26ms p95=   7.04ms errors=0
+dolt       range procs   same     clients= 8 inflight/client=4 ops/s=   4340 p50=   6.13ms p95=  15.42ms errors=0
+dolt       range procs   same     clients=16 inflight/client=4 ops/s=   4268 p50=  12.14ms p95=  34.36ms errors=0
+dolt       range procs   same     clients=32 inflight/client=4 ops/s=   4245 p50=  26.92ms p95=  59.57ms errors=0
+dolt       range procs   distinct clients= 1 inflight/client=4 ops/s=    890 p50=   4.40ms p95=   5.99ms errors=0
+dolt       range procs   distinct clients= 2 inflight/client=4 ops/s=   1703 p50=   4.64ms p95=   6.17ms errors=0
+dolt       range procs   distinct clients= 4 inflight/client=4 ops/s=   3932 p50=   3.29ms p95=   7.09ms errors=0
+dolt       range procs   distinct clients= 8 inflight/client=4 ops/s=   4293 p50=   6.20ms p95=  15.66ms errors=0
+dolt       range procs   distinct clients=16 inflight/client=4 ops/s=   4242 p50=  12.46ms p95=  33.04ms errors=0
+dolt       range procs   distinct clients=32 inflight/client=4 ops/s=   4184 p50=  27.43ms p95=  59.54ms errors=0
+delete done
+calibration done

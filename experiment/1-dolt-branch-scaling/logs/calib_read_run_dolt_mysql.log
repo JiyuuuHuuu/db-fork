@@ -1,0 +1,51 @@
+create done
+dolt_mysql point threads same     clients= 1 inflight/client=4 ops/s=   4160 p50=   0.95ms p95=   1.00ms
+dolt_mysql point threads same     clients= 2 inflight/client=4 ops/s=   2321 p50=   3.03ms p95=   6.82ms
+dolt_mysql point threads same     clients= 4 inflight/client=4 ops/s=   1453 p50=   5.73ms p95=  37.35ms
+dolt_mysql point threads same     clients= 8 inflight/client=4 ops/s=   1506 p50=   2.68ms p95= 112.29ms
+dolt_mysql point threads same     clients=16 inflight/client=4 ops/s=   1495 p50=   2.74ms p95= 247.42ms
+dolt_mysql point threads same     clients=32 inflight/client=4 ops/s=   1406 p50=  68.05ms p95= 263.15ms
+dolt_mysql point threads distinct clients= 1 inflight/client=4 ops/s=   4101 p50=   0.96ms p95=   1.01ms
+dolt_mysql point threads distinct clients= 2 inflight/client=4 ops/s=   1500 p50=   5.05ms p95=   8.16ms
+dolt_mysql point threads distinct clients= 4 inflight/client=4 ops/s=   1652 p50=   5.80ms p95=  31.73ms
+dolt_mysql point threads distinct clients= 8 inflight/client=4 ops/s=   1530 p50=   2.70ms p95= 113.48ms
+dolt_mysql point threads distinct clients=16 inflight/client=4 ops/s=   1504 p50=   2.74ms p95= 209.32ms
+dolt_mysql point threads distinct clients=32 inflight/client=4 ops/s=   1434 p50=  66.66ms p95= 259.67ms
+dolt_mysql point procs   same     clients= 1 inflight/client=4 ops/s=   4461 p50=   0.87ms p95=   0.97ms
+dolt_mysql point procs   same     clients= 2 inflight/client=4 ops/s=   8201 p50=   0.96ms p95=   1.10ms
+dolt_mysql point procs   same     clients= 4 inflight/client=4 ops/s=  15445 p50=   1.01ms p95=   1.27ms
+dolt_mysql point procs   same     clients= 8 inflight/client=4 ops/s=  29586 p50=   1.05ms p95=   1.33ms
+dolt_mysql point procs   same     clients=16 inflight/client=4 ops/s=  38611 p50=   1.82ms p95=   2.44ms
+dolt_mysql point procs   same     clients=32 inflight/client=4 ops/s=  40124 p50=   1.87ms p95=  16.81ms
+dolt_mysql point procs   distinct clients= 1 inflight/client=4 ops/s=   4186 p50=   0.95ms p95=   0.99ms
+dolt_mysql point procs   distinct clients= 2 inflight/client=4 ops/s=   8371 p50=   0.94ms p95=   1.11ms
+dolt_mysql point procs   distinct clients= 4 inflight/client=4 ops/s=  15292 p50=   1.02ms p95=   1.29ms
+dolt_mysql point procs   distinct clients= 8 inflight/client=4 ops/s=  29910 p50=   1.03ms p95=   1.32ms
+dolt_mysql point procs   distinct clients=16 inflight/client=4 ops/s=  38304 p50=   1.82ms p95=   2.46ms
+dolt_mysql point procs   distinct clients=32 inflight/client=4 ops/s=  40016 p50=   1.88ms p95=  16.23ms
+dolt_mysql range threads same     clients= 1 inflight/client=4 ops/s=    387 p50=  10.27ms p95=  10.48ms
+dolt_mysql range threads same     clients= 2 inflight/client=4 ops/s=    264 p50=  26.13ms p95=  72.00ms
+dolt_mysql range threads same     clients= 4 inflight/client=4 ops/s=    139 p50= 109.75ms p95= 186.63ms
+dolt_mysql range threads same     clients= 8 inflight/client=4 ops/s=    139 p50= 213.88ms p95= 423.56ms
+dolt_mysql range threads same     clients=16 inflight/client=4 ops/s=    145 p50= 433.65ms p95= 816.11ms
+dolt_mysql range threads same     clients=32 inflight/client=4 ops/s=    142 p50= 870.20ms p95=1749.64ms
+dolt_mysql range threads distinct clients= 1 inflight/client=4 ops/s=    385 p50=  10.29ms p95=  10.50ms
+dolt_mysql range threads distinct clients= 2 inflight/client=4 ops/s=    224 p50=  28.05ms p95=  76.23ms
+dolt_mysql range threads distinct clients= 4 inflight/client=4 ops/s=    137 p50= 110.69ms p95= 180.91ms
+dolt_mysql range threads distinct clients= 8 inflight/client=4 ops/s=    138 p50= 219.68ms p95= 415.21ms
+dolt_mysql range threads distinct clients=16 inflight/client=4 ops/s=    141 p50= 435.27ms p95= 843.94ms
+dolt_mysql range threads distinct clients=32 inflight/client=4 ops/s=    142 p50= 867.62ms p95=1744.19ms
+dolt_mysql range procs   same     clients= 1 inflight/client=4 ops/s=    392 p50=  10.18ms p95=  10.31ms
+dolt_mysql range procs   same     clients= 2 inflight/client=4 ops/s=    769 p50=  10.38ms p95=  10.59ms
+dolt_mysql range procs   same     clients= 4 inflight/client=4 ops/s=   1414 p50=  11.31ms p95=  11.51ms
+dolt_mysql range procs   same     clients= 8 inflight/client=4 ops/s=   2764 p50=  11.56ms p95=  11.75ms
+dolt_mysql range procs   same     clients=16 inflight/client=4 ops/s=   3409 p50=  23.47ms p95=  23.88ms
+dolt_mysql range procs   same     clients=32 inflight/client=4 ops/s=   3371 p50=  39.76ms p95=  56.20ms
+dolt_mysql range procs   distinct clients= 1 inflight/client=4 ops/s=    392 p50=  10.12ms p95=  10.32ms
+dolt_mysql range procs   distinct clients= 2 inflight/client=4 ops/s=    783 p50=  10.18ms p95=  10.38ms
+dolt_mysql range procs   distinct clients= 4 inflight/client=4 ops/s=   1424 p50=  11.19ms p95=  11.41ms
+dolt_mysql range procs   distinct clients= 8 inflight/client=4 ops/s=   2748 p50=  11.62ms p95=  11.83ms
+dolt_mysql range procs   distinct clients=16 inflight/client=4 ops/s=   3394 p50=  23.58ms p95=  24.02ms
+dolt_mysql range procs   distinct clients=32 inflight/client=4 ops/s=   3345 p50=  39.93ms p95=  56.39ms
+delete done
+calibration done

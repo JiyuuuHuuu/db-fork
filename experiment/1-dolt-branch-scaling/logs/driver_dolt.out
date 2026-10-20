@@ -1,0 +1,20 @@
+2026-10-15T19:14:56Z === dolt scaling study: backend=dolt smoke=false phases=e1l,e1t,e2l,e2t,e3,ctrl seed_db=ch_w1_seed updates/branch=100 host=node1.branchdb.rasl-pg0.wisc.cloudlab.us
+2026-10-15T19:14:56Z START e1l_fan_out
+2026-10-15T19:37:36Z DONE  e1l_fan_out (1360s)
+2026-10-15T19:37:36Z START e1l_spine
+2026-10-15T20:00:20Z DONE  e1l_spine (1364s)
+2026-10-15T20:00:20Z START e1t
+2026-10-15T20:15:38Z DONE  e1t (918s)
+2026-10-15T20:15:38Z START e2l_fan_out
+2026-10-15T21:52:35Z DONE  e2l_fan_out (5817s)
+2026-10-15T21:52:35Z START e2l_spine
+2026-10-15T23:02:08Z DONE  e2l_spine (4173s)
+2026-10-15T23:02:08Z START e2t
+2026-10-16T00:36:57Z DONE  e2t (5689s)
+2026-10-16T00:36:57Z START e3
+2026-10-16T01:03:50Z DONE  e3 (1613s)
+2026-10-16T01:03:50Z START ctrl_latency
+2026-10-16T01:17:40Z DONE  ctrl_latency (830s)
+2026-10-16T01:17:40Z START ctrl_throughput
+2026-10-16T01:32:33Z DONE  ctrl_throughput (893s)
+2026-10-16T01:32:33Z === study done
