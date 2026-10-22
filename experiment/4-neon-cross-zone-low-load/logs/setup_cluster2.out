@@ -1,0 +1,27 @@
+== disks and directories
+  a0: /dev/sdc xfs 444G free
+  a4: /dev/sdc xfs 444G free
+  a2: /dev/sdc xfs 444G free
+  a3: /dev/sdc xfs 444G free
+  b1: tmpfs    6G
+  a1: /dev/sdc xfs 444G free
+== binaries
+== per-node configs and units
+  a0: a0,control,safekeeper ok
+  a1: a1,safekeeper ok
+  a2: a2,pageserver ok
+  a3: a3,safekeeper ok
+  a4: a4,seedcompute ok
+  b1: b1,compute ok
+== start services
+null[{"id":1,"availability":"Active","scheduling":"Active","availability_zone_id":"lan","listen_http_addr":"10.10.1.12","listen_http_port":9898,"listen_https_port":null,"listen_pg_addr":"10.10.1.12","listen_pg_port":64000,"listen_grpc_addr":null,"listen_grpc_port":null}]
+  a0 agent: {"t": 1792655015.4907408}
+  a1 agent: {"t": 1792655015.7836738}
+  a2 agent: {"t": 1792655016.1023836}
+  a3 agent: {"t": 1792655016.4068856}
+  a4 agent: {"t": 1792655016.7274044}
+  b1 agent: {"t": 1792655017.6273}
+== client nodes: repo copy and venv
+  venv ok on b0.branchdb.rasl-pg0.apt.emulab.net
+  venv ok on a4.branchdb.rasl-pg0.wisc.cloudlab.us
+== done

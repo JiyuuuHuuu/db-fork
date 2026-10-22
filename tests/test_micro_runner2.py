@@ -502,7 +502,7 @@ def test_range_query_bounds_select_exactly_the_range():
     suite.exec(["CREATE TABLE t2 (a INTEGER, b INTEGER, v TEXT, PRIMARY KEY (a, b))"]
                + [("INSERT INTO t2 VALUES (?, ?, 'x')", k) for k in keys], timed=False)
     ctx = SimpleNamespace(get_pk_columns=lambda t: ["a", "b"], get_pk_values=lambda t: list(keys),
-                          rnd=random.Random(7))
+                          rnd=random.Random(7), _meta_key=lambda kind, t: ("range-bounds-test", kind, t))
     crossed = 0
     for _ in range(200):
         info = runner2.WorkerContext.prepare_range_query(ctx, "t2", 25, "range read")
@@ -511,3 +511,57 @@ def test_range_query_bounds_select_exactly_the_range():
         assert [tuple(r) for r in rows] == info["keys_in_range"]
         crossed += info["keys_in_range"][0][0] != info["keys_in_range"][-1][0]
     assert crossed > 0   # ranges spanning two values of the leading column were covered
+
+
+def test_range_query_sorts_the_keys_once_per_process():
+    import random
+    from types import SimpleNamespace
+
+    class Keys(list):
+        iterations = 0
+
+        def __iter__(self):
+            type(self).iterations += 1
+            return super().__iter__()
+
+    keys = Keys([(a, b) for a in (3, 1, 2) for b in range(40, 0, -1)])
+    ctx = SimpleNamespace(get_pk_columns=lambda t: ["a", "b"], get_pk_values=lambda t: keys,
+                          rnd=random.Random(3), _meta_key=lambda kind, t: ("sort-once-test", kind, t))
+    for _ in range(50):
+        info = runner2.WorkerContext.prepare_range_query(ctx, "t3", 10, "range read")
+        assert info["keys_in_range"] == sorted(info["keys_in_range"])
+    assert Keys.iterations == 1
+
+
+def test_prewarm_sql_runs_unrecorded_before_the_warm_up(monkeypatch):
+    calls = []
+
+    class Collector:
+        recording = True
+
+        def set_recording(self, on):
+            self.recording = on
+
+    class Ctx:
+        thread_id = 1
+        current_branch = "b1"
+        shared_progress = None
+        result_collector = Collector()
+
+        def run_sql(self, sql, params=None, timed=True):
+            calls.append(("sql", sql, timed, self.result_collector.recording))
+
+    class Op:
+        def execute(self, ctx):
+            calls.append(("op", ctx.result_collector.recording))
+
+    runner = object.__new__(runner2.OperationRunner)
+    runner.context, runner.operation = Ctx(), Op()
+    monkeypatch.setenv("DBFORK_PREWARM_SQL", "SET x = 1; SELECT pg_prewarm('t') ;")
+    runner.execute_multiple(2, warmup_ops=1)
+    assert calls[:2] == [("sql", "SET x = 1", False, False), ("sql", "SELECT pg_prewarm('t')", False, False)]
+    assert calls[2:] == [("op", False), ("op", True), ("op", True)]
+    calls.clear()
+    monkeypatch.delenv("DBFORK_PREWARM_SQL")
+    runner.execute_multiple(1)
+    assert calls == [("op", True)]

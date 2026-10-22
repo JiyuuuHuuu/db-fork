@@ -1,0 +1,4 @@
+compute 10.10.2.11:20000 start_ms 3057
+first connection to bench: connect 1851 ms, first SELECT 1 200 ms; GetPage waits 108, 2521 ms
+compute 10.10.2.11:20000 start_ms 2980
+first connection to bench: connect 1872 ms, first SELECT 1 161 ms; GetPage waits 107, 2478 ms

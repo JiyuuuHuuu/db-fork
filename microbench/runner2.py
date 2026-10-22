@@ -1820,7 +1820,10 @@ class WorkerContext:
         if not existing_pks:
             raise ValueError(f"No existing keys for {operation_name}")
 
-        sorted_pks = sorted(existing_pks)
+        # Sorted once per process: sorting millions of keys on every range
+        # read costs seconds per operation (untimed, but it stretches runs).
+        sorted_pks = _cached_meta(self._meta_key("sorted_pks", table_name),
+                                  lambda: sorted(existing_pks))
         total_keys = len(sorted_pks)
         range_size = min(range_size, total_keys)
 
@@ -2181,6 +2184,22 @@ class OperationRunner:
             timed_phase: Shared start barrier and timed window. The timed ops
                 start only once every worker has finished its warm-up.
         """
+        # Optional untimed preparation on this worker's branch before the
+        # warm-up, e.g. filling a compute-side cache: DBFORK_PREWARM_SQL holds
+        # statements separated by ';' (none may contain ';' itself).
+        prewarm = [s.strip() for s in os.environ.get("DBFORK_PREWARM_SQL", "").split(";") if s.strip()]
+        if prewarm:
+            t0 = time.time()
+            self.context.result_collector.set_recording(False)
+            try:
+                for stmt in prewarm:
+                    self.context.run_sql(stmt, timed=False)
+            finally:
+                self.context.result_collector.set_recording(True)
+            if self.context.thread_id == 0:
+                print(f"Prewarm ({len(prewarm)} statements on {self.context.current_branch}) "
+                      f"took {time.time() - t0:.1f}s")
+
         # Execute warm-up operations (if any). They are not recorded, so the
         # results only ever hold timed ops.
         if warmup_ops > 0:

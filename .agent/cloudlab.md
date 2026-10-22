@@ -83,6 +83,28 @@ well short of that because of loss on the WAN, not the TCP buffers. The 1 GbE wi
 times slower than the LAN, so keep within-zone traffic on 10.10.x addresses. Scripts and raw iperf3/ping output are
 in `.agent/network-probe-2026-10-22/`.
 
+### Experiment 4 layout (self-hosted Neon across the two zones, from 22 Oct 2026)
+
+Set up by `experiment/4-neon-cross-zone-low-load/scripts/setup_neon_cluster.sh` (roles in its `scripts/cluster.env`).
+Storage layer in Wisconsin, client and computes in Utah; compute-to-storage traffic uses the public addresses.
+
+| Node | Role |
+|---|---|
+| a0 | storage controller + its Postgres, storage broker, compute-hook stub, safekeeper 1 |
+| a1, a3 | safekeepers 2 and 3 |
+| a2 | pageserver (`/mnt/ssd/ps`, "remote storage" `/mnt/ssd/ps-remote`) |
+| a4 | seeding compute only (agent with `--computes`, LAN to the storage layer, statement log off) |
+| a5, a6, a7 | spare (room for more pageservers) |
+| b0 | benchmark client (`~/db-fork`, `.env` from `neon_ctl.py env-init --from-seed-json`) |
+| b1 | compute node: computes on a 6 GB tmpfs at `/mnt/tmpfs/computes` (no SSD in Utah) |
+| b2-b7 | spare (room for more compute nodes) |
+
+On a0-a4 `/dev/sdc` is XFS at `/mnt/ssd` and holds everything (binaries in `/mnt/ssd/neon-bin`, units' wrappers
+in `/mnt/ssd/neon-svc`); on b1 the binaries are in `~/neon/bin`. Every agent node runs `neon-agent` on port 9000
+and keeps `~/neon-archive` (compute logs, start metrics, 1 s counter samples). `RemoveIPC=no` everywhere.
+Agent replies must not wait on Nagle (the agent sets `disable_nagle_algorithm`): with kept-alive connections
+each reply otherwise waited 40 ms for a delayed ACK.
+
 ## Previous cluster (experiments 1-3, released by 22 Oct 2026)
 
 Profile `branchdb` in project `rasl-pg0`, eight c220g2 nodes at Wisconsin on one LAN. These hostnames no longer

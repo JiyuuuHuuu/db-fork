@@ -1,0 +1,167 @@
+tenant 926999fe7b1d48c086c816ad42c84d07, seed timeline 679efcd783784cc194e2647bbf0becac
+seed compute 10.10.1.14:20000 up in 383 ms
+Seeding CH-benCHmark at W=60...
+  seeded       region:         5 rows
+  seeded       nation:        25 rows
+  seeded     supplier:    10,000 rows
+  seeded    warehouse:        60 rows
+  seeded     district:       600 rows
+  seeded         item:   100,000 rows
+  seeded     customer: 1,800,000 rows
+  seeded      history: 1,800,000 rows
+  seeded        stock: 6,000,000 rows
+  seeded       orders: 1,800,000 rows
+  seeded    new_order:   540,000 rows
+  seeded   order_line: 18,001,760 rows
+Data ready: 30,052,450 rows in 2870.7s
+database 5.11 GiB; largest: stock 1996 MiB, order_line 1695 MiB, order_line_pkey 541 MiB, customer 504 MiB, history 138 MiB
+{
+  "tenant_id": "926999fe7b1d48c086c816ad42c84d07",
+  "seed_timeline_id": "679efcd783784cc194e2647bbf0becac",
+  "seed": {
+    "source": "generated",
+    "scale_factor": 60,
+    "rows": {
+      "region": 5,
+      "nation": 25,
+      "supplier": 10000,
+      "warehouse": 60,
+      "district": 600,
+      "item": 100000,
+      "customer": 1800000,
+      "history": 1800000,
+      "stock": 6000000,
+      "orders": 1800000,
+      "new_order": 540000,
+      "order_line": 18001760
+    },
+    "seed_db": null,
+    "seed_db_created": false,
+    "seed_sec": 2870.7,
+    "vacuum_sec": 2.1,
+    "relations": {
+      "stock": {
+        "kind": "r",
+        "bytes": 2092933120,
+        "rows": 6000474
+      },
+      "order_line": {
+        "kind": "r",
+        "bytes": 1776984064,
+        "rows": 17999484
+      },
+      "order_line_pkey": {
+        "kind": "i",
+        "bytes": 567517184,
+        "rows": 17999484
+      },
+      "customer": {
+        "kind": "r",
+        "bytes": 528031744,
+        "rows": 1800048
+      },
+      "history": {
+        "kind": "r",
+        "bytes": 144457728,
+        "rows": 1800000
+      },
+      "stock_pkey": {
+        "kind": "i",
+        "bytes": 134791168,
+        "rows": 6000474
+      },
+      "orders": {
+        "kind": "r",
+        "bytes": 108429312,
+        "rows": 1800000
+      },
+      "customer_pkey": {
+        "kind": "i",
+        "bytes": 40460288,
+        "rows": 1800048
+      },
+      "orders_pkey": {
+        "kind": "i",
+        "bytes": 40460288,
+        "rows": 1800000
+      },
+      "new_order": {
+        "kind": "r",
+        "bytes": 19578880,
+        "rows": 540000
+      },
+      "new_order_pkey": {
+        "kind": "i",
+        "bytes": 12124160,
+        "rows": 540000
+      },
+      "item": {
+        "kind": "r",
+        "bytes": 10633216,
+        "rows": 100000
+      },
+      "item_pkey": {
+        "kind": "i",
+        "bytes": 2260992,
+        "rows": 100000
+      },
+      "supplier": {
+        "kind": "r",
+        "bytes": 1490944,
+        "rows": 10000
+      },
+      "supplier_pkey": {
+        "kind": "i",
+        "bytes": 245760,
+        "rows": 10000
+      },
+      "district": {
+        "kind": "r",
+        "bytes": 73728,
+        "rows": 600
+      },
+      "district_pkey": {
+        "kind": "i",
+        "bytes": 32768,
+        "rows": 600
+      },
+      "warehouse_pkey": {
+        "kind": "i",
+        "bytes": 16384,
+        "rows": 60
+      },
+      "region_pkey": {
+        "kind": "i",
+        "bytes": 16384,
+        "rows": 5
+      },
+      "nation_pkey": {
+        "kind": "i",
+        "bytes": 16384,
+        "rows": 25
+      },
+      "region": {
+        "kind": "r",
+        "bytes": 8192,
+        "rows": 5
+      },
+      "warehouse": {
+        "kind": "r",
+        "bytes": 8192,
+        "rows": 60
+      },
+      "nation": {
+        "kind": "r",
+        "bytes": 8192,
+        "rows": 25
+      }
+    },
+    "database_bytes": 5490155520,
+    "layers": {
+      "Delta": 42,
+      "Image": 89
+    },
+    "last_record_lsn": "1/C8CC0AD0"
+  },
+  "seconds": 3242.1
+}
