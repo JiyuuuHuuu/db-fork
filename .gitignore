@@ -229,3 +229,7 @@ db_setup/BIRD-Critic-sol
 
 # MacOS specific files
 *.DS_Store
+
+# Network probes: not the raw outputs (.agent/network-probe-<date>/raw/: iperf3/ping/hardware results);
+# the findings are in .agent/cloudlab.md
+.agent/network-probe-*/raw/

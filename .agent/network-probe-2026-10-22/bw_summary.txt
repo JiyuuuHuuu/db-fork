@@ -1,0 +1,50 @@
+aa_lan_a0-a1_P1                  9414 Mbit/s retr=95
+aa_lan_a0-a1_P8                  9081 Mbit/s retr=9513
+aa_lan_a2-a7_P8                  9295 Mbit/s retr=11873
+aa_pub_a0-a1_P1                   940 Mbit/s retr=21
+aa_pub_a0-a1_P8                   938 Mbit/s retr=46
+bb_lan_b0-b1_P1                  9402 Mbit/s retr=0
+bb_lan_b0-b1_P8                  9402 Mbit/s retr=0
+bb_lan_b2-b7_P8                  9401 Mbit/s retr=0
+bb_pub_b0-b1_P1                   941 Mbit/s retr=6
+bb_pub_b0-b1_P8                   936 Mbit/s retr=33
+ab_pub_a0-b0_P1                    72 Mbit/s retr=9
+ab_pub_a0-b0_P8                   287 Mbit/s retr=35
+ba_pub_b0-a0_P1                   365 Mbit/s retr=5
+ba_pub_b0-a0_P8                   467 Mbit/s retr=26
+ab_pub_a3-b5_P1                   117 Mbit/s retr=8
+ab_pub_a3-b5_P8                   357 Mbit/s retr=27
+ba_pub_b5-a3_P1                   357 Mbit/s retr=3
+ba_pub_b5-a3_P8                   572 Mbit/s retr=40
+ab_pub_a6-b2_P1                   461 Mbit/s retr=4
+ab_pub_a6-b2_P8                   734 Mbit/s retr=14
+ba_pub_b2-a6_P1                   608 Mbit/s retr=2
+ba_pub_b2-a6_P8                   681 Mbit/s retr=21
+  agg_ab_a0-b0                  170
+  agg_ab_a1-b1                  181
+  agg_ab_a2-b2                  890
+  agg_ab_a3-b3                  193
+  agg_ab_a4-b4                  174
+  agg_ab_a5-b5                  150
+  agg_ab_a6-b6                  207
+  agg_ab_a7-b7                  148
+agg_ab total 2113 Mbit/s
+  agg_ba_a0-b0                  583
+  agg_ba_a1-b1                  589
+  agg_ba_a2-b2                  803
+  agg_ba_a3-b3                  641
+  agg_ba_a4-b4                  641
+  agg_ba_a5-b5                  539
+  agg_ba_a6-b6                  684
+  agg_ba_a7-b7                  601
+agg_ba total 5081 Mbit/s
+  agglan_a_a0-a4               9415
+  agglan_a_a1-a5               9411
+  agglan_a_a2-a6               9414
+  agglan_a_a3-a7               9415
+agglan_a total 37655 Mbit/s
+  agglan_b_b0-b4               9393
+  agglan_b_b1-b5               9402
+  agglan_b_b2-b6               9402
+  agglan_b_b3-b7               9403
+agglan_b total 37599 Mbit/s
