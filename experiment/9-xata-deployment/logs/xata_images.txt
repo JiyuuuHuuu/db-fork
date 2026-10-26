@@ -1,0 +1,31 @@
+      1 image: adorsys/keycloak-config-cli:6.5.1-26.5.5
+      1 image: docker.io/envoyproxy/ratelimit:49af5cca
+      1 image: docker.io/timberio/vector:0.55.0-distroless-libc
+      3 image: envoyproxy/gateway:v1.2.4
+      1 image: ghcr.io/cloudnative-pg/plugin-barman-cloud:v0.10.0
+      1 image: ghcr.io/xataio/cnpg-i-scale-to-zero:v0.1.8
+      9 image: ghcr.io/xataio/xata/auth:f197e7b
+      1 image: ghcr.io/xataio/xata/branch-operator:f197e7b
+      1 image: ghcr.io/xataio/xata/clusters:f197e7b
+      1 image: ghcr.io/xataio/xata-cnpg/cloudnative-pg:g228b764
+      1 image: ghcr.io/xataio/xata/gateway:f197e7b
+      1 image: ghcr.io/xataio/xata/keycloak:f197e7b
+      2 image: ghcr.io/xataio/xata/projects:f197e7b
+      1 image: postgres:15.4
+      1 image: postgres:17
+      1 image: quay.io/jetstack/cert-manager-cainjector:v1.18.2
+      1 image: quay.io/jetstack/cert-manager-controller:v1.18.2
+      1 image: quay.io/jetstack/cert-manager-webhook:v1.18.2
+      1 image: quay.io/keycloak/keycloak-operator:26.8.1
+      2 image: rustfs/rustfs:1.0.0
+      1 image:tag`
+      1 image: victoriametrics/victoria-logs:v1.50.0
+      1 image: victoriametrics/victoria-metrics:v1.143.0
+      1 image: victoriametrics/vmagent:v1.143.0
+ghcr.io/xataio/xata/auth:f197e7b
+ghcr.io/xataio/xata/branch-operator:f197e7b
+ghcr.io/xataio/xata/clusters:f197e7b
+ghcr.io/xataio/xata/gateway:f197e7b
+ghcr.io/xataio/xata/keycloak:f197e7b
+ghcr.io/xataio/xata/projects:f197e7b
+ghcr.io/xataio/xata/scale-to-zero-sidecar:f197e7b

@@ -135,6 +135,20 @@ Pause; only its seed timeline left, no computes running. Experiment 5's tenant `
 its seed timeline. Pageserver node 2 is Active (it was Paused while seeding, and a new tenant would now be placed on
 it unless pinned). Agents' experiment-5 archives are in `~/neon-archive-exp5`, experiment 8's in `~/neon-archive`.
 
+### Experiment 9 layout (self-hosted Xata on a6, from 25 Oct 2026)
+
+Set up by `experiment/9-xata-deployment/scripts/node_setup_k3s_zfs.sh` and `node_deploy_xata.sh`. a6 runs
+a single-node k3s (`v1.33.5+k3s1`, data dir `/mnt/ssd/k3s`, kubeconfig `~/.kube/config`) with OpenEBS
+ZFS-LocalPV on pool `xpool` (a 200 GB file `/mnt/ssd/xpool.img`) and the full Xata stack (namespaces
+`xata`, `xata-clusters`, `cnpg-system`, ...). Port-forwards: Keycloak `localhost:8080`, REST API
+`localhost:5081` (pid files `~/pf-*.pid`); SQL gateway on `<a6 IP>:7654` (k3s ServiceLB). The old
+experiment-4 files in `/mnt/ssd` (`computes`, `neon-bin`, `neon-svc`) are untouched.
+
+State after experiment 9 (25 Oct 2026): 16 branches in projects `smoke` and `nobackup`, several
+hibernated. k3s network-policy enforcement is disabled (`/etc/rancher/k3s/config.yaml`), region `local`
+has `backups_enabled = false`, and the smoke root still has scale-to-zero at 1 min. a7 is still unused.
+Cleanup commands are in the experiment's `REPRODUCE.md`.
+
 ## Previous cluster (experiments 1-3, released by 22 Oct 2026)
 
 Profile `branchdb` in project `rasl-pg0`, eight c220g2 nodes at Wisconsin on one LAN. These hostnames no longer
