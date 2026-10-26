@@ -1,0 +1,38 @@
+{
+  "node": "b2",
+  "computes": 100,
+  "reads": 200,
+  "compute_opts": {
+    "lfc_mb": 36,
+    "statement_log": false,
+    "pgdata_on_disk": true
+  },
+  "before": {
+    "computes": 0,
+    "processes": 0,
+    "rss_mb": 0.0,
+    "mem_available_mb": 14988.90625
+  },
+  "start_s": 12.9,
+  "started": {
+    "computes": 100,
+    "processes": 1168,
+    "rss_mb": 18057.62890625,
+    "mem_available_mb": 10778.4296875
+  },
+  "work_s": 116.3,
+  "after": {
+    "computes": 100,
+    "processes": 1201,
+    "rss_mb": 20302.44140625,
+    "mem_available_mb": 6712.90625
+  },
+  "lfc_used_pages_first_compute": {
+    "stdout": "lfc_used_pages|4608\n",
+    "stderr": ""
+  },
+  "mem_per_compute_mb": 82.8,
+  "rss_per_compute_mb": 203.0,
+  "computes_per_node_with_2gb_spare": 156,
+  "max_n_7_nodes": 1092
+}

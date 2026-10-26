@@ -28,12 +28,17 @@ Environment:
     NEON_LOCAL_TENANT_ID, NEON_LOCAL_SEED_TIMELINE_ID
     NEON_LOCAL_PG_USER, NEON_LOCAL_PG_PASSWORD, NEON_LOCAL_DB (default bench)
     NEON_LOCAL_SHARED_BUFFERS   compute shared_buffers (default: the agent's, 1MB)
+    NEON_LOCAL_COMPUTE_OPTS     optional JSON object merged into every compute-start request
+                                to the agent (e.g. {"lfc_mb": 36, "statement_log": false}); the
+                                agent defines the keys, unset keys keep the agent's defaults
+    NEON_LOCAL_PURGE_PARALLEL   timelines deleted at once by purge/teardown_run (default 16)
     NEON_LOCAL_RUN_NONCE, NEON_LOCAL_RUN_ROOT  set by setup_run
 """
 
 import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -90,10 +95,24 @@ def seed_timeline() -> str:
     return _env("NEON_LOCAL_SEED_TIMELINE_ID")
 
 
+_NUMBERED = re.compile(r"_(\d+)$")
+
+
 def timeline_id_for(branch: str) -> str:
+    """md5(nonce/branch). For a numbered branch (name ending in _<i>, e.g. the runner's setup_branch_<i>) the id
+    is shifted so that it maps to agent i mod (number of agents) in agent_for: the computes of N numbered branches
+    spread evenly over the compute nodes (a plain hash put up to 40% more than the average on one node), and every
+    process still derives the same id from the name alone."""
     if branch == MAIN_BRANCH:
         return _env("NEON_LOCAL_RUN_ROOT")
-    return hashlib.md5(f"{_env('NEON_LOCAL_RUN_NONCE')}/{branch}".encode()).hexdigest()
+    tid = int(hashlib.md5(f"{_env('NEON_LOCAL_RUN_NONCE')}/{branch}".encode()).hexdigest(), 16)
+    m = _NUMBERED.search(branch)
+    k = len(_list("NEON_LOCAL_AGENTS")) if os.environ.get("NEON_LOCAL_AGENTS") else 1
+    if m and k > 1:
+        tid = tid - tid % k + (int(m.group(1)) - 1) % k
+        if tid < 0:
+            tid += k
+    return f"{tid:032x}"
 
 
 def create_timeline(timeline_id: str, ancestor: str) -> None:
@@ -140,6 +159,9 @@ def ensure_compute(timeline_id: str, shared_buffers: Optional[str] = None) -> di
     sb = shared_buffers or os.environ.get("NEON_LOCAL_SHARED_BUFFERS")
     if sb:
         body["shared_buffers"] = sb
+    opts = os.environ.get("NEON_LOCAL_COMPUTE_OPTS", "").strip()
+    if opts:
+        body.update(json.loads(opts))
     status, resp = http("POST", f"{agent_for(timeline_id)}/computes", body, timeout=600)
     if status != 200:
         raise RuntimeError(f"compute start for {timeline_id}: HTTP {status} {resp}")
@@ -166,9 +188,14 @@ def stop_all_computes() -> int:
     return sum((r[1] or {}).get("stopped", 0) for r in res if isinstance(r[1], dict))
 
 
-def purge(keep=(), log=print, parallel: int = 16) -> int:
+def purge(keep=(), log=print, parallel: Optional[int] = None) -> int:
     """Stop every compute and delete every timeline except the seed and
-    ``keep``, children before parents. Returns the number deleted."""
+    ``keep``, children before parents. Returns the number deleted.
+    ``parallel`` deletes at once (default NEON_LOCAL_PURGE_PARALLEL, else 16): a
+    deletion waits until the pageserver has removed the timeline, which takes
+    seconds for a timeline that took writes, and the storage controller runs
+    deletions of one tenant concurrently."""
+    parallel = parallel or int(os.environ.get("NEON_LOCAL_PURGE_PARALLEL") or 16)
     stopped = stop_all_computes()
     keep = set(keep) | {seed_timeline()}
     deleted = 0

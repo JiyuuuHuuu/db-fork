@@ -107,6 +107,28 @@ and keeps `~/neon-archive` (compute logs, start metrics, 1 s counter samples). `
 Agent replies must not wait on Nagle (the agent sets `disable_nagle_algorithm`): with kept-alive connections
 each reply otherwise waited 40 ms for a delayed ACK.
 
+### Experiment 5 layout (Neon across the two zones, scaling, from 22 Oct 2026)
+
+Set up by `experiment/5-neon-cross-zone-scaling/scripts/setup_neon_cluster.sh` and `setup_remote_storage_nfs.sh`
+(roles in its `scripts/cluster.env`). Experiment 4's storage layer and placement, plus a second pageserver and
+seven compute nodes.
+
+| Node | Role |
+|---|---|
+| a0 | storage controller + its Postgres, broker, compute-hook stub (threaded since 23 Oct), safekeeper 1 |
+| a1, a3 | safekeepers 2 and 3 |
+| a2 | pageserver node 1; exports its remote storage `/mnt/ssd/ps-remote` over NFS (LAN) |
+| a5 | pageserver node 2 (`/mnt/ssd/ps`; `/mnt/ssd/ps-remote` is a2's, NFS); registered with scheduling Pause, Active since the shard split |
+| a4 | seeding compute only |
+| a6, a7 | unused (a6 runs Xata from experiment 9, see below) |
+| b0 | benchmark client (`RemoveIPC=no`; `py-spy` in `~/.local/bin`) |
+| b1-b7 | compute nodes: LFC files on a 12 GB tmpfs `/mnt/tmpfs/computes`, data directories of many-compute runs in `~/neon-computes` |
+
+State after the experiment (23 Oct 2026): tenant `490d45eece1d4d08aa89462e927b90a7` (W=4 seed) split into 2 shards
+(shard 0 on a2, shard 1 on a5), scheduling Pause; only its seed timeline left; bench role has
+`statement_timeout = 600s`. The W=60 tenant of experiment 4 is still attached to a2 (scheduling Pause). Services and
+agents left running. Agents' experiment-4 archives moved to `~/neon-archive-exp4` on every node.
+
 ## Previous cluster (experiments 1-3, released by 22 Oct 2026)
 
 Profile `branchdb` in project `rasl-pg0`, eight c220g2 nodes at Wisconsin on one LAN. These hostnames no longer

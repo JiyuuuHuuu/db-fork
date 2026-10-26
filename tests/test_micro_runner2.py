@@ -565,3 +565,32 @@ def test_prewarm_sql_runs_unrecorded_before_the_warm_up(monkeypatch):
     monkeypatch.delenv("DBFORK_PREWARM_SQL")
     runner.execute_multiple(1)
     assert calls == [("op", True)]
+
+
+def test_background_clients_run_the_prewarm_before_their_first_op(monkeypatch):
+    calls = []
+
+    class Collector:
+        recording = True
+
+        def set_recording(self, on):
+            self.recording = on
+
+    class Ctx:
+        thread_id = 7
+        current_branch = "setup_branch_1"
+        shared_progress = None
+        result_collector = Collector()
+
+        def run_sql(self, sql, params=None, timed=True):
+            calls.append(("sql", sql, timed, self.result_collector.recording))
+
+    runner = object.__new__(runner2.OperationRunner)
+    runner.context = Ctx()
+    monkeypatch.setenv("DBFORK_PREWARM_SQL", "SELECT pg_prewarm('t')")
+    runner.run_prewarm()
+    assert calls == [("sql", "SELECT pg_prewarm('t')", False, False)]
+    assert Ctx.result_collector.recording
+    src = open(runner2.__file__).read()
+    bg = src[src.index("runner = OperationRunner(self.config, ctx, op_type=self.config.background_operation)"):]
+    assert bg.index("runner.run_prewarm()") < bg.index("runner.run_until(")

@@ -1,0 +1,294 @@
+{
+ "node": "b2",
+ "reads": 3000,
+ "compute_opts": {
+  "lfc_mb": 36,
+  "statement_log": false
+ },
+ "after_prewarm": {
+  "contents": [
+   [
+    "stock",
+    "0",
+    "3339"
+   ],
+   [
+    "stock_pkey",
+    "0",
+    "1099"
+   ],
+   [
+    "relfilenode 2691",
+    "0",
+    "11"
+   ],
+   [
+    "relfilenode 1255",
+    "0",
+    "10"
+   ],
+   [
+    "relfilenode 1249",
+    "0",
+    "8"
+   ],
+   [
+    "relfilenode 2690",
+    "0",
+    "7"
+   ],
+   [
+    "pg_depend_depender_index",
+    "0",
+    "6"
+   ],
+   [
+    "relfilenode 2659",
+    "0",
+    "6"
+   ],
+   [
+    "relfilenode 1259",
+    "0",
+    "6"
+   ],
+   [
+    "relfilenode 1247",
+    "0",
+    "5"
+   ],
+   [
+    "pg_amop",
+    "0",
+    "5"
+   ],
+   [
+    "relfilenode 2704",
+    "0",
+    "5"
+   ],
+   [
+    "relfilenode 2663",
+    "0",
+    "4"
+   ],
+   [
+    "relfilenode 2662",
+    "0",
+    "4"
+   ],
+   [
+    "pg_index",
+    "0",
+    "4"
+   ],
+   [
+    "relfilenode 2703",
+    "0",
+    "4"
+   ],
+   [
+    "pg_amop_opr_fam_index",
+    "0",
+    "4"
+   ],
+   [
+    "pg_operator_oprname_l_r_n_index",
+    "0",
+    "4"
+   ],
+   [
+    "pg_statistic",
+    "0",
+    "4"
+   ],
+   [
+    "pg_amop_fam_strat_index",
+    "0",
+    "3"
+   ],
+   [
+    "pg_statistic_relid_att_inh_index",
+    "0",
+    "3"
+   ],
+   [
+    "pg_amproc_fam_proc_index",
+    "0",
+    "3"
+   ],
+   [
+    "pg_operator_oid_index",
+    "0",
+    "3"
+   ],
+   [
+    "pg_operator",
+    "0",
+    "3"
+   ],
+   [
+    "pg_aggregate_fnoid_index",
+    "0",
+    "2"
+   ]
+  ],
+  "stats": {
+   "file_cache_chunk_size_pages": "1",
+   "file_cache_misses": "5136",
+   "file_cache_hits": "39",
+   "file_cache_used": "4608",
+   "file_cache_writes": "5206",
+   "file_cache_size": "4608",
+   "file_cache_used_pages": "4608",
+   "file_cache_evicted_pages": "536",
+   "file_cache_limit": "4608",
+   "file_cache_chunks_pinned": "0"
+  }
+ },
+ "read_s": 100.9,
+ "hit_share_client": 0.183,
+ "two_round_trip_share": 0.0003333333333333333,
+ "after_reads": {
+  "contents": [
+   [
+    "stock",
+    "0",
+    "3316"
+   ],
+   [
+    "stock_pkey",
+    "0",
+    "1099"
+   ],
+   [
+    "relfilenode 1259",
+    "0",
+    "39"
+   ],
+   [
+    "relfilenode 1255",
+    "0",
+    "10"
+   ],
+   [
+    "relfilenode 1249",
+    "0",
+    "10"
+   ],
+   [
+    "relfilenode 2659",
+    "0",
+    "9"
+   ],
+   [
+    "relfilenode 2690",
+    "0",
+    "7"
+   ],
+   [
+    "relfilenode 2662",
+    "0",
+    "7"
+   ],
+   [
+    "pg_toast_2619",
+    "0",
+    "7"
+   ],
+   [
+    "pg_statistic",
+    "0",
+    "6"
+   ],
+   [
+    "pg_amop",
+    "0",
+    "5"
+   ],
+   [
+    "relfilenode 2704",
+    "0",
+    "4"
+   ],
+   [
+    "relfilenode 1247",
+    "0",
+    "4"
+   ],
+   [
+    "pg_amop_opr_fam_index",
+    "0",
+    "4"
+   ],
+   [
+    "pg_index",
+    "0",
+    "4"
+   ],
+   [
+    "pg_statistic_relid_att_inh_index",
+    "0",
+    "4"
+   ],
+   [
+    "relfilenode 2691",
+    "0",
+    "4"
+   ],
+   [
+    "pg_operator",
+    "0",
+    "4"
+   ],
+   [
+    "pg_operator_oprname_l_r_n_index",
+    "0",
+    "4"
+   ],
+   [
+    "relfilenode 2663",
+    "0",
+    "4"
+   ],
+   [
+    "pg_amproc_fam_proc_index",
+    "0",
+    "3"
+   ],
+   [
+    "pg_amop_fam_strat_index",
+    "0",
+    "3"
+   ],
+   [
+    "pg_operator_oid_index",
+    "0",
+    "3"
+   ],
+   [
+    "relfilenode 2703",
+    "0",
+    "3"
+   ],
+   [
+    "relfilenode 2655",
+    "0",
+    "3"
+   ]
+  ],
+  "stats": {
+   "file_cache_chunk_size_pages": "1",
+   "file_cache_misses": "7648",
+   "file_cache_hits": "2527",
+   "file_cache_used": "4608",
+   "file_cache_writes": "10224",
+   "file_cache_size": "4608",
+   "file_cache_used_pages": "4608",
+   "file_cache_evicted_pages": "3048",
+   "file_cache_limit": "4608",
+   "file_cache_chunks_pinned": "0"
+  }
+ },
+ "heap_first": true
+}

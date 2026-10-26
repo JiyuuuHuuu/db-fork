@@ -2170,6 +2170,25 @@ class OperationRunner:
                 )
             raise
 
+    def run_prewarm(self) -> None:
+        """Optional untimed preparation on this worker's branch before the
+        warm-up, e.g. filling a compute-side cache: DBFORK_PREWARM_SQL holds
+        statements separated by ';' (none may contain ';' itself). Measured
+        workers (sync mode) and background clients both run it."""
+        prewarm = [s.strip() for s in os.environ.get("DBFORK_PREWARM_SQL", "").split(";") if s.strip()]
+        if not prewarm:
+            return
+        t0 = time.time()
+        self.context.result_collector.set_recording(False)
+        try:
+            for stmt in prewarm:
+                self.context.run_sql(stmt, timed=False)
+        finally:
+            self.context.result_collector.set_recording(True)
+        if self.context.thread_id == 0:
+            print(f"Prewarm ({len(prewarm)} statements on {self.context.current_branch}) "
+                  f"took {time.time() - t0:.1f}s")
+
     def execute_multiple(
         self,
         num_ops: int,
@@ -2184,21 +2203,7 @@ class OperationRunner:
             timed_phase: Shared start barrier and timed window. The timed ops
                 start only once every worker has finished its warm-up.
         """
-        # Optional untimed preparation on this worker's branch before the
-        # warm-up, e.g. filling a compute-side cache: DBFORK_PREWARM_SQL holds
-        # statements separated by ';' (none may contain ';' itself).
-        prewarm = [s.strip() for s in os.environ.get("DBFORK_PREWARM_SQL", "").split(";") if s.strip()]
-        if prewarm:
-            t0 = time.time()
-            self.context.result_collector.set_recording(False)
-            try:
-                for stmt in prewarm:
-                    self.context.run_sql(stmt, timed=False)
-            finally:
-                self.context.result_collector.set_recording(True)
-            if self.context.thread_id == 0:
-                print(f"Prewarm ({len(prewarm)} statements on {self.context.current_branch}) "
-                      f"took {time.time() - t0:.1f}s")
+        self.run_prewarm()
 
         # Execute warm-up operations (if any). They are not recorded, so the
         # results only ever hold timed ops.
@@ -3064,6 +3069,10 @@ class BenchmarkExecutor:
                     initial_db_size=ctx.initial_db_size(), seed=seed,
                 )
                 runner = OperationRunner(self.config, ctx, op_type=self.config.background_operation)
+                try:
+                    runner.run_prewarm()
+                except Exception as e:  # a failed prewarm only leaves the cache cold
+                    print(f"background prewarm on {ctx.current_branch} failed: {e}")
                 # One untimed operation first (connection, key cache, row
                 # generator), so the client is really working once it
                 # reports started.
