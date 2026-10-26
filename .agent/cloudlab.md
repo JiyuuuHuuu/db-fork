@@ -129,6 +129,12 @@ State after the experiment (23 Oct 2026): tenant `490d45eece1d4d08aa89462e927b90
 `statement_timeout = 600s`. The W=60 tenant of experiment 4 is still attached to a2 (scheduling Pause). Services and
 agents left running. Agents' experiment-4 archives moved to `~/neon-archive-exp4` on every node.
 
+State after experiment 8 (25 Oct 2026, same layout): new tenant `625258ca0fcb429fabea4ca7adc237a5` (W=3 seed, bench
+role `statement_timeout = 600s` set by the seed) split into 2 shards (shard 0 on a2, shard 1 on a5), scheduling
+Pause; only its seed timeline left, no computes running. Experiment 5's tenant `490d45ee...` is still there with only
+its seed timeline. Pageserver node 2 is Active (it was Paused while seeding, and a new tenant would now be placed on
+it unless pinned). Agents' experiment-5 archives are in `~/neon-archive-exp5`, experiment 8's in `~/neon-archive`.
+
 ## Previous cluster (experiments 1-3, released by 22 Oct 2026)
 
 Profile `branchdb` in project `rasl-pg0`, eight c220g2 nodes at Wisconsin on one LAN. These hostnames no longer
