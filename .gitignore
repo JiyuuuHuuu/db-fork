@@ -233,4 +233,6 @@ db_setup/BIRD-Critic-sol
 # Network probes: not the raw outputs (.agent/network-probe-<date>/raw/: iperf3/ping/hardware results)
 # nor experiment 4's probe output; the findings are in .agent/cloudlab.md and the experiment's REPRODUCE.md
 .agent/network-probe-*/raw/
-experiment/4-neon-cross-zone-low-load/logs/network_probe.out
+experiment/4-neon-cross-zone-low-load/logs/network_probe*.out
+**.out
+**.log

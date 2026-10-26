@@ -1,0 +1,6 @@
+[submodule "3rdparty/xata"]
+	path = 3rdparty/xata
+	url = git@github.com:xataio/xata.git
+[submodule "3rdparty/neon"]
+	path = 3rdparty/neon
+	url = git@github.com:neondatabase/neon.git
