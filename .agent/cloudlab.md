@@ -94,7 +94,9 @@ Storage layer in Wisconsin, client and computes in Utah; compute-to-storage traf
 | a1, a3 | safekeepers 2 and 3 |
 | a2 | pageserver (`/mnt/ssd/ps`, "remote storage" `/mnt/ssd/ps-remote`) |
 | a4 | seeding compute only (agent with `--computes`, LAN to the storage layer, statement log off) |
-| a5, a6, a7 | spare (room for more pageservers) |
+| a5 | one-zone setup: benchmark client (`.env` with `DBFORK_SETUP=onezone`) |
+| a6 | one-zone setup: compute node, computes on its SSD (`/mnt/ssd/computes`), storage reached over public IPs |
+| a7 | spare (room for another pageserver) |
 | b0 | benchmark client (`~/db-fork`, `.env` from `neon_ctl.py env-init --from-seed-json`) |
 | b1 | compute node: computes on a 6 GB tmpfs at `/mnt/tmpfs/computes` (no SSD in Utah) |
 | b2-b7 | spare (room for more compute nodes) |

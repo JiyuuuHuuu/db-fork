@@ -16,6 +16,8 @@ CloudLab experiment `branchDB` (project rasl-PG0), two groups without routers be
 | a4 | c220g2-011023.wisc.cloudlab.us | 10.10.1.14 | 128.105.145.97 | seeding compute (and seeding client) |
 | b0 | apt107.apt.emulab.net | 10.10.2.10 | 128.110.96.107 | benchmark client |
 | b1 | apt116.apt.emulab.net | 10.10.2.11 | 128.110.96.116 | compute node |
+| a5 | c220g2-010822.wisc.cloudlab.us | 10.10.1.15 | 128.105.145.64 | one-zone setup: benchmark client |
+| a6 | c220g2-011302.wisc.cloudlab.us | 10.10.1.16 | 128.105.145.137 | one-zone setup: compute node (125 GiB RAM) |
 
 - Wisconsin (a*): c220g2, 2x Xeon E5-2660 v3 (40 threads), 157 GiB RAM, 447 GB Intel S3500 SSD at `/dev/sdc`
   (XFS at `/mnt/ssd`, holds all Neon data), 10 GbE LAN.
@@ -83,6 +85,29 @@ $X/scripts/pull_data.sh
 uv run python $X/scripts/breakdown.py           # figures/breakdown.{csv,json,md}; prints consistency checks
 uv run python $X/scripts/plot_low_load.py       # figures/low_load.png, figures/low_load_breakdown.png
 ```
+
+## 4b. The one-zone setup (about 30 min)
+
+Same storage layer and seed; client a5 (c220g2-010822, 10.10.1.15 / 128.105.145.64) and compute node a6
+(c220g2-011302, 10.10.1.16 / 128.105.145.137; computes on its SSD). Run after 4.1-4.4.
+
+```bash
+DBFORK_SETUP=onezone $X/scripts/setup_neon_cluster.sh     # 10 min; formats a6's SSD, copies compute binaries, sets up a5
+#   (rewrites a0-a3's agent units and restarts those agents; services and data are untouched)
+# network probe: ping/iperf3 a6 -> a2 on the public and LAN addresses, a5 -> a6 and a5 -> a0 -> logs/network_probe_onezone.out
+ssh a5 'cd db-fork && cat > $X/data/neon_local/seed.json' < $X/data/neon_local/seed.json
+ssh a5 'cd db-fork && DBFORK_SETUP=onezone uv run python $X/scripts/neon_ctl.py env-init --from-seed-json $X/data/neon_local/seed.json'
+ssh a5 'cd db-fork && uv run python $X/scripts/neon_ctl.py clock-check'                       # within 0.2 ms
+ssh a5 'cd db-fork && $X/scripts/run_low_load.sh --smoke --ops READ'                          # 2 min
+ssh a5 'cd db-fork && setsid nohup $X/scripts/run_low_load.sh > $X/logs/driver_onezone.out 2>&1 < /dev/null &'   # 8 min
+DBFORK_SETUP=onezone $X/scripts/pull_data.sh
+uv run python $X/scripts/breakdown.py --data $X/data/neon_local_onezone --compute-node a6 \
+    --net-label "public network" --tag onezone
+uv run python $X/scripts/plot_low_load.py        # both setups (reads figures/breakdown.json and breakdown_onezone.json)
+```
+
+`env-init` writes `DBFORK_SETUP=onezone` into a5's `.env`, so `run_low_load.sh` and `neon_ctl.py` there pick up
+`scripts/cluster_onezone.env` (client, compute node, `data/neon_local_onezone`).
 
 Pass checks for the breakdown: per bar the components sum to the client mean, the number of logged
 statements equals the number of client statements, the LFC hit ratio and GetPage waits per point read match the
