@@ -20,6 +20,11 @@ process resolves a name without a registry. ``setup_run`` sets the nonce and
 the run root (the branch "main") in ``os.environ``; client processes spawned
 afterwards inherit both.
 
+Every service URL may also name a Unix domain socket, ``http+unix://<hex of the
+absolute socket path>/<http path>`` (the Neon fork's convention, see its
+``libs/uds_http``); ``unix_url()`` builds one. A compute's ``host`` may be a
+directory, which libpq takes as a Unix-socket directory.
+
 Environment:
     NEON_LOCAL_STORCON_URL      http://10.10.1.4:1234
     NEON_LOCAL_PAGESERVER_URL   http://10.10.1.3:9898 (deletion polling)
@@ -36,10 +41,12 @@ Environment:
 """
 
 import hashlib
+import http.client
 import json
 import os
 import re
 import secrets
+import socket
 import threading
 import time
 import urllib.error
@@ -71,16 +78,66 @@ def _list(name: str) -> list:
     return [x.strip().rstrip("/") for x in _env(name).split(",") if x.strip()]
 
 
-def http(method: str, url: str, body=None, timeout: float = 120):
-    """(status, parsed JSON or text) of one HTTP request."""
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers={"Content-Type": "application/json"} if data else {})
+UNIX_SCHEME = "http+unix://"
+
+
+def unix_url(sock_path: str, http_path: str = "") -> str:
+    """``http+unix://<hex(sock_path)><http_path>``: an HTTP endpoint on a Unix socket."""
+    return UNIX_SCHEME + os.fsencode(sock_path).hex() + http_path
+
+
+def split_unix_url(url: str):
+    """(socket path, request path) of an ``http+unix://`` URL, else None."""
+    if not url.startswith(UNIX_SCHEME):
+        return None
+    rest = url[len(UNIX_SCHEME):]
+    host, sep, path = rest.partition("/")
+    return bytes.fromhex(host).decode(), "/" + path if sep else "/"
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    """http.client over an AF_UNIX stream socket."""
+
+    def __init__(self, sock_path: str, timeout: float = 120):
+        super().__init__("localhost", timeout=timeout)
+        self.sock_path = sock_path
+
+    def connect(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(self.timeout)
+        try:
+            s.connect(self.sock_path)
+        except OSError:
+            s.close()
+            raise
+        self.sock = s
+
+
+def _unix_request(sock_path: str, path: str, method: str, data, timeout: float):
+    conn = UnixHTTPConnection(sock_path, timeout=timeout)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            status, raw = r.status, r.read()
-    except urllib.error.HTTPError as e:
-        status, raw = e.code, e.read()
+        conn.request(method, path, body=data,
+                     headers={"Content-Type": "application/json"} if data else {})
+        r = conn.getresponse()
+        return r.status, r.read()
+    finally:
+        conn.close()
+
+
+def http(method: str, url: str, body=None, timeout: float = 120):
+    """(status, parsed JSON or text) of one HTTP request. ``http+unix://`` URLs go over a Unix socket."""
+    data = json.dumps(body).encode() if body is not None else None
+    unix = split_unix_url(url)
+    if unix is not None:
+        status, raw = _unix_request(unix[0], unix[1], method, data, timeout)
+    else:
+        req = urllib.request.Request(url, data=data, method=method,
+                                     headers={"Content-Type": "application/json"} if data else {})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                status, raw = r.status, r.read()
+        except urllib.error.HTTPError as e:
+            status, raw = e.code, e.read()
     try:
         return status, json.loads(raw or b"null")
     except ValueError:
@@ -278,6 +335,7 @@ class NeonLocalToolSuite(DBToolSuite):
     def _open(self, timeline_id: str):
         last = None
         for attempt in range(3):
+            # host: an address, or a directory holding the compute's Unix socket (libpq semantics)
             host, port = self._compute(timeline_id, refresh=attempt > 0)
             try:
                 conn = psycopg2.connect(host=host, port=port, dbname=_env("NEON_LOCAL_DB", "bench"),
