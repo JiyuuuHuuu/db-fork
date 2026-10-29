@@ -1,0 +1,26 @@
+pair       path kind   |  loss ping min    avg   mdev | tcp p50    p99 | hops
+g1a->g1b   lan  same   |    0%       77    128      9 |     298    327 | -
+g1a->g1b   pub  same   |    0%      123    148     10 |     288    333 | 1
+g1a->g2a   lan  cross  |  100%        -      -      - |    fail      - | -
+g1a->g2a   pub  cross  |    0%      960   1005     12 |    1186   1214 | 1
+g1a->g2b   lan  cross  |  100%        -      -      - |    fail      - | -
+g1a->g2b   pub  cross  |    0%      939   1004     13 |    1189   1217 | 1
+g1b->g1a   lan  same   |    0%       76    110      4 |     280    310 | -
+g1b->g1a   pub  same   |    0%      100    128      3 |     313    330 | 1
+g1b->g2a   lan  cross  |  100%        -      -      - |    fail      - | -
+g1b->g2a   pub  cross  |    0%      973   1041     15 |    1229   1275 | 1
+g1b->g2b   lan  cross  |  100%        -      -      - |    fail      - | -
+g1b->g2b   pub  cross  |    0%      985   1039     16 |    1223   1266 | 1
+g2a->g1a   lan  cross  |  100%        -      -      - |    fail      - | -
+g2a->g1a   pub  cross  |    0%      936    988     14 |    1174   1210 | 1
+g2a->g1b   lan  cross  |  100%        -      -      - |    fail      - | -
+g2a->g1b   pub  cross  |    0%      955   1038     18 |    1217   1257 | 1
+g2a->g2b   lan  same   |    0%       82    132      9 |     319    357 | -
+g2a->g2b   pub  same   |    0%       90    152     10 |     313    336 | 1
+g2b->g1a   lan  cross  |  100%        -      -      - |    fail      - | -
+g2b->g1a   pub  cross  |    0%      940    991     10 |    1177   1210 | 1
+g2b->g1b   lan  cross  |  100%        -      -      - |    fail      - | -
+g2b->g1b   pub  cross  |    0%      980   1039     17 |    1218   1258 | 1
+g2b->g2a   lan  same   |    0%      102    129      9 |     299    349 | -
+g2b->g2a   pub  same   |    0%       99    150      9 |     339    362 | 1
+(ping/tcp numbers in microseconds; ping = 1000 ICMP probes at 5 ms; tcp = 2000 64-byte ping-pongs, TCP_NODELAY, python)

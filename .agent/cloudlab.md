@@ -1,5 +1,12 @@
 # CloudLab specs
 
+```
+ssh JiyuHu23@c220g1-030806.wisc.cloudlab.us
+ssh JiyuHu23@c220g1-030814.wisc.cloudlab.us
+ssh JiyuHu23@c220g2-011308.wisc.cloudlab.us
+ssh JiyuHu23@c220g2-011313.wisc.cloudlab.us
+```
+
 ## Current cluster (from 22 Oct 2026): two zones
 
 Profile `branchDB` in project `rasl-PG0`. Sixteen nodes in two groups with no routers between them. Group A is 8
