@@ -567,6 +567,12 @@ Addendum (27 Oct 2026; plan in [plan.md](plan.md), "Addendum"):
   (EAGAIN). The run with both services niced failed on the second write. It was rerun after a retry was added, with
   the same commands as `scripts/run_create_sched.sh`. The services were restarted after each niced run and stopped at
   the end.
+  - The failed attempt left its CPU sampler running on port 9010. The rerun's own sampler therefore could not bind,
+    and the rerun's CPU numbers in `summary_nice_scps.csv` come from the leftover sampler. It sampled the same CPU
+    sets and pid files, and its counters are cumulative, so the numbers are valid.
+  - The leftover kept appending to `cpu/point_n256_nice_scps{,.procs}.csv` until it was found and stopped on 29 Oct.
+    Both files were then trimmed to the rerun's window, which is the window the other points' files cover: 126.2 s
+    before to 1.5 s after the end of pgbench (from the pgbench output files' times).
 - **The planned `create_vs_runqueue` figure was replaced by `create_contention.png`.** Go's run-queue length does
   not order the dirty points: at 256 and 1,024 busy branches most sessions are parked on the lock, not runnable.
 
