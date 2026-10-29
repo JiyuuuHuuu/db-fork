@@ -1,0 +1,135 @@
+# Experiment 5's CloudLab placement (profile branchDB, project rasl-PG0; cluster of 22 Oct 2026, see
+# .agent/cloudlab.md): Neon's storage layer at Wisconsin (c220g2, SSD /dev/sdc), the client and the computes in Utah
+# (APT r320, no SSD: computes on a 12 GB tmpfs). Within a zone services use the 10 GbE LAN; across zones the public
+# addresses (the two LANs do not route to each other; round trip ~39 ms).
+
+name = "cloudlab_two_zone"
+state_dir = "/mydata/jiyu/bench-two-zone"   # on the coordinator: env files, seed.json, binaries staged for rsync
+
+[ssh]
+user = "JiyuHu23"
+key = "~/.ssh/dassl_rsa"
+
+[nodes.a0]
+host = "c220g2-011312.wisc.cloudlab.us"
+lan = "10.10.1.10"
+public = "128.105.145.147"
+zone = "wisc"
+ssd_dev = "/dev/sdc"                     # XFS, mounted at data_root (default /mnt/ssd)
+disk_dev = "sdc"
+
+[nodes.a1]
+host = "c220g2-011127.wisc.cloudlab.us"
+lan = "10.10.1.11"
+public = "128.105.145.130"
+zone = "wisc"
+ssd_dev = "/dev/sdc"
+disk_dev = "sdc"
+
+[nodes.a2]
+host = "c220g2-030631.wisc.cloudlab.us"
+lan = "10.10.1.12"
+public = "128.105.145.168"
+zone = "wisc"
+ssd_dev = "/dev/sdc"
+disk_dev = "sdc"
+
+[nodes.a3]
+host = "c220g2-011014.wisc.cloudlab.us"
+lan = "10.10.1.13"
+public = "128.105.145.88"
+zone = "wisc"
+ssd_dev = "/dev/sdc"
+disk_dev = "sdc"
+
+[nodes.a4]
+host = "c220g2-011023.wisc.cloudlab.us"
+lan = "10.10.1.14"
+public = "128.105.145.97"
+zone = "wisc"
+ssd_dev = "/dev/sdc"
+disk_dev = "sdc"
+server_numa = "0"                        # Doltgres server on socket 0, its client on socket 1 (experiments 1, 2)
+client_numa = "1"
+
+[nodes.a5]
+host = "c220g2-010822.wisc.cloudlab.us"
+lan = "10.10.1.15"
+public = "128.105.145.64"
+zone = "wisc"
+ssd_dev = "/dev/sdc"
+disk_dev = "sdc"
+
+[nodes.b0]
+host = "apt107.apt.emulab.net"
+lan = "10.10.2.10"
+public = "128.110.96.107"
+zone = "utah"
+
+[nodes.b1]
+host = "apt116.apt.emulab.net"
+lan = "10.10.2.11"
+public = "128.110.96.116"
+zone = "utah"
+tmpfs_size = "12G"                       # computes on /mnt/tmpfs/computes
+
+[nodes.b2]
+host = "apt095.apt.emulab.net"
+lan = "10.10.2.12"
+public = "128.110.96.95"
+zone = "utah"
+tmpfs_size = "12G"
+
+[nodes.b3]
+host = "apt118.apt.emulab.net"
+lan = "10.10.2.13"
+public = "128.110.96.118"
+zone = "utah"
+tmpfs_size = "12G"
+
+[nodes.b4]
+host = "apt101.apt.emulab.net"
+lan = "10.10.2.14"
+public = "128.110.96.101"
+zone = "utah"
+tmpfs_size = "12G"
+
+[nodes.b5]
+host = "apt109.apt.emulab.net"
+lan = "10.10.2.15"
+public = "128.110.96.109"
+zone = "utah"
+tmpfs_size = "12G"
+
+[nodes.b6]
+host = "apt115.apt.emulab.net"
+lan = "10.10.2.16"
+public = "128.110.96.115"
+zone = "utah"
+tmpfs_size = "12G"
+
+[nodes.b7]
+host = "apt112.apt.emulab.net"
+lan = "10.10.2.17"
+public = "128.110.96.112"
+zone = "utah"
+tmpfs_size = "12G"
+
+[neon]
+build_dir = "/mydata/jiyu/neon"          # on the coordinator; binaries are rsynced to the nodes
+transport = "tcp"
+client = "b0"
+storcon = "a0"                           # + its Postgres, the broker's neighbour, the compute-hook stub
+broker = "a0"
+seed_compute = "a4"                      # loads the dataset over the Wisconsin LAN
+pageservers = ["a2", "a5"]               # node ids 1, 2; a5 joins with scheduling Pause (shard-split uses it)
+safekeepers = ["a0", "a1", "a3"]
+compute_agents = ["b1", "b2", "b3", "b4", "b5", "b6", "b7"]   # round-robin; cold start uses the first
+
+[doltgres]
+version = "1.4.0"
+server = "a4"                            # experiments 1/2: server and client on one node, one socket each
+client = "a4"
+
+[workload]
+# experiment 5's defaults

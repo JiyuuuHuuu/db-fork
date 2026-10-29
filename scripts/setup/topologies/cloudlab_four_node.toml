@@ -1,0 +1,60 @@
+# The 4-node CloudLab Wisconsin cluster of 29 Oct 2026 (.agent/network-probe-2026-10-29/): g1a, g1b are c220g1 on
+# VLAN lanA (10.10.1.x), g2a, g2b are c220g2 on VLAN lanB (10.10.2.x). The VLANs do not route to each other, so the
+# two pairs are separate zones reached over the public network (emulated AZs: scripts/az_netem.sh adds 0.4 ms each
+# way between zones, ~1 ms round trip). A sketch placement: storage in zone 1, client and computes in zone 2.
+# Disks and NUMA layout were not probed yet: check ssd_dev before `setup/neon.py install`.
+
+name = "cloudlab_four_node"
+state_dir = "/mydata/jiyu/bench-four-node"
+
+[ssh]
+user = "JiyuHu23"
+key = "~/.ssh/dassl_rsa"
+
+[nodes.g1a]
+host = "c220g1-030806.wisc.cloudlab.us"
+lan = "10.10.1.10"
+public = "128.105.145.209"
+zone = "z1"
+ssd_dev = "/dev/sdc"
+
+[nodes.g1b]
+host = "c220g1-030814.wisc.cloudlab.us"
+lan = "10.10.1.11"
+public = "128.105.145.217"
+zone = "z1"
+ssd_dev = "/dev/sdc"
+
+[nodes.g2a]
+host = "c220g2-011308.wisc.cloudlab.us"
+lan = "10.10.2.10"
+public = "128.105.145.143"
+zone = "z2"
+ssd_dev = "/dev/sdc"
+server_numa = "0"
+client_numa = "1"
+
+[nodes.g2b]
+host = "c220g2-011313.wisc.cloudlab.us"
+lan = "10.10.2.11"
+public = "128.105.145.148"
+zone = "z2"
+ssd_dev = "/dev/sdc"
+
+[neon]
+build_dir = "/mydata/jiyu/neon"
+transport = "tcp"
+client = "g2a"
+storcon = "g1a"
+broker = "g1a"
+seed_compute = "g1b"
+pageservers = ["g1b"]
+safekeepers = ["g1a", "g1b", "g2b"]      # three safekeepers need three nodes
+compute_agents = ["g2b"]
+
+[doltgres]
+version = "1.4.0"
+server = "g1a"                           # client in the other zone: requests cross the emulated AZ link
+client = "g2a"
+
+[workload]

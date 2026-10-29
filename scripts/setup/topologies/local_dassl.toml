@@ -1,0 +1,41 @@
+# dassl-serv-01, everything on one machine (experiments 7, 10, 11).
+# 4x Xeon Gold 6418H, NUMA nodes 0-3 of 24 cores (no SMT); node k holds CPUs k, k+4, ..., k+92.
+# Placement is experiment 7's / 11's: the server (all of Neon, or Doltgres) on the first 10 CPUs of node 2 with
+# node 2's memory; the benchmark clients on the other 14 CPUs of node 2 and all 24 of node 3. Neon and Doltgres
+# share the 10 server CPUs, so only one of them runs at a time (the setup scripts refuse otherwise).
+# Neon talks over Unix domain sockets (experiment 10's fork, branch local-uds).
+
+name = "local_dassl"
+state_dir = "/mydata/jiyu/bench-local"   # binaries snapshot, data, sockets, pids, env files (NVMe)
+
+[nodes.local]
+host = "local"
+disk_dev = "nvme2c2n1"                   # /mydata is nvme2n1; NVMe multipath keeps its counters on nvme2c2n1
+server_cpus = "2-38:4"                   # 10 cores of node 2
+server_mem = "2"
+client_cpus = "42-94:4,3-95:4"           # 38 cores
+client_mem = "2,3"
+
+[neon]
+build_dir = "/mydata/jiyu/neon"          # fork with built binaries (cargo target/release, pg_install/v17)
+transport = "uds"
+client = "local"
+storcon = "local"
+broker = "local"
+seed_compute = "local"
+pageservers = ["local"]
+safekeepers = ["local"]
+compute_agents = ["local"]
+
+[neon.workload]
+# 1,024 computes do not fit in node 2's 64 GB (experiments 10/11: ~80 MB each).
+ns_data = [1, 4, 16, 64, 128, 256, 512]
+
+[doltgres]
+version = "1.4.0"
+server = "local"
+client = "local"
+
+[workload]
+# experiment 5's defaults (scripts/setup/topo.py WORKLOAD_DEFAULTS); override here, e.g.
+# W = 1
