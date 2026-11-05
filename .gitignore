@@ -236,3 +236,5 @@ db_setup/BIRD-Critic-sol
 experiment/4-neon-cross-zone-low-load/logs/network_probe*.out
 **.out
 **.log
+# netem status/apply/remove captures written by the experiments' run scripts (az_netem.sh output per node)
+experiment/*/logs/netem_*.txt
