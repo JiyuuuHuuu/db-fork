@@ -15,6 +15,7 @@ enum Backend {
   BAUPLAN = 11;
   TERMINUSDB = 12;
   NEON_LOCAL = 13;  // self-hosted Neon cluster (dblib/neon_local.py)
+  PGCOPY = 14;      // branch = pg_basebackup copy to a node + a new PostgreSQL instance (dblib/pgcopy.py)
 }
 
 // Operation types for benchmarking

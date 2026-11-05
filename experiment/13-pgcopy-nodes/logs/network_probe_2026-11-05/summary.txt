@@ -1,0 +1,14 @@
+240 ordered pairs
+  ping avg RTT (us)            n=240  min    71.00  median   111.00  max   147.00
+  ping loss (%)                n=240  min     0.00  median     0.00  max     0.00
+  TCP 64 B RTT median (us)     n=240  min   173.35  median   238.40  max   273.60
+  TCP 64 B RTT p99 (us)        n=240  min   213.10  median   252.35  max   563.90
+  RDMA write lat typ (us)      n=240  min     1.64  median     2.34  max     2.42
+RDMA latency: largest gap 0.56 us at 2.05 us; 126 of 240 pairs above it
+  inferred switch groups (low-latency components): n0 n2 n5 n6 n7 n9 n11 n12 n13 | n1 n3 n4 n8 n10 n14 n15
+slowest 5 pairs by TCP median:
+  n6->n13: TCP 273.6 us, ping 144.0 us, RDMA 1.74 us
+  n15->n13: TCP 273.2 us, ping 145.0 us, RDMA 2.37 us
+  n14->n13: TCP 272.1 us, ping 143.0 us, RDMA 2.37 us
+  n8->n13: TCP 271.9 us, ping 145.0 us, RDMA 2.36 us
+  n4->n13: TCP 270.6 us, ping 146.0 us, RDMA 2.36 us

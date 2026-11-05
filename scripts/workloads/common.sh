@@ -4,7 +4,7 @@
 #
 # Common arguments of every driver:
 #   --topology FILE        scripts/setup/topologies/<name>.toml
-#   --backend neon|doltgres
+#   --backend neon|doltgres|pgcopy
 #   --outdir DIR           results go to DIR/<backend>/<workload>/ (smoke: DIR/<backend>/smoke/<workload>/)
 #   [--smoke]              counts /10 (at least 30), N = 1,4, 10 creates
 #   [--ns LIST]            busy-branch counts (default: the topology's ns_data / ns_branch)
@@ -41,8 +41,8 @@ parse_args() {
             *)          REST+=("$1"); shift ;;
         esac
     done
-    [[ -n $TOPO && -n $BACKEND_ARG && -n $OUTDIR ]] || die "--topology FILE --backend neon|doltgres --outdir DIR are required"
-    [[ $BACKEND_ARG == neon || $BACKEND_ARG == doltgres ]] || die "--backend neon|doltgres"
+    [[ -n $TOPO && -n $BACKEND_ARG && -n $OUTDIR ]] || die "--topology FILE --backend neon|doltgres|pgcopy --outdir DIR are required"
+    [[ $BACKEND_ARG == neon || $BACKEND_ARG == doltgres || $BACKEND_ARG == pgcopy ]] || die "--backend neon|doltgres|pgcopy"
     [[ -f $TOPO ]] || die "no topology file $TOPO"
     TOPO="$(cd "$(dirname "$TOPO")" && pwd)/$(basename "$TOPO")"
     $DRY || mkdir -p "$OUTDIR" || die "cannot create $OUTDIR"
@@ -56,7 +56,7 @@ load_env() {
     unset DBFORK_SERVER_HOST DBFORK_SERVER_SSH DBFORK_PREWARM_SQL DBFORK_REMOTE_CPU DBFORK_SERVER_PID DBFORK_SETUP
     unset DOLT_HOST DOLT_PORT DOLT_USER DOLT_PASSWORD DOLT_DATA_DIR
     local v
-    for v in $(compgen -e | grep -E '^(NEON_LOCAL_|DBFORK_)'); do unset "$v"; done
+    for v in $(compgen -e | grep -E '^(NEON_LOCAL_|PGCOPY_|DBFORK_)'); do unset "$v"; done
     local sh
     sh=$(uv run python scripts/setup/topo.py shell "$TOPO" --backend "$BACKEND_ARG") || die "topology $TOPO is invalid"
     eval "$sh"
@@ -112,6 +112,13 @@ neon_prewarm_sql() {
     echo "SET maintenance_io_concurrency = 128; SELECT pg_prewarm('stock','buffer','main',0,$((PREWARM_HEAP_BLOCKS - 1))); SELECT pg_prewarm('stock_pkey')"
 }
 
+# pgcopy_opts STATEMENT_LOG(true|false): JSON for PGCOPY_INSTANCE_OPTS (every instance the run creates)
+pgcopy_opts() { echo "{\"statement_log\":$1}"; }
+
+# prewarm_backend: the backends whose branches get the Neon prewarm (pgcopy: the same pages into its 40 MB of
+# shared_buffers, experiment 13)
+prewarm_backend() { [[ $BACKEND == neon || $BACKEND == pgcopy ]]; }
+
 # compute_opts STATEMENT_LOG(true|false) [PGDATA_ON_DISK(true|false)]: JSON for NEON_LOCAL_COMPUTE_OPTS: the
 # pageserver shards (NEON_LOCAL_PS_OPTS, after a shard split), the LFC size, statement logging (on for low
 # contention and cold start: the compute log holds per-statement durations; off for the scaling runs) and, for the
@@ -143,7 +150,7 @@ is_done() { [[ -f $PROGRESS ]] && grep -q "^.* DONE  $1 " "$PROGRESS"; }
 
 shared_md5() {
     local f files=(microbench/runner2.py dblib/db_api.py scripts/run_throughput_bench.sh)
-    [[ $BACKEND == neon ]] && files+=(dblib/neon_local.py) || files+=(dblib/dolt.py)
+    case $BACKEND in neon) files+=(dblib/neon_local.py) ;; pgcopy) files+=(dblib/pgcopy.py) ;; *) files+=(dblib/dolt.py) ;; esac
     files+=(scripts/workloads/common.sh scripts/workloads/"$WORKLOAD".sh scripts/workloads/"$WORKLOAD".py)
     for f in "${files[@]}"; do
         [[ -f $f ]] && md5sum "$f" | awk '{printf "%s:%s ", $2, substr($1,1,8)}'
@@ -175,7 +182,11 @@ setup_ctl() {  # SUBCMD ARGS...: scripts/setup/<backend>.py TOPO SUBCMD ... if t
 guards() {  # refuse to run unless the client host, the server, the environment and the disk are as intended
     on_client_host || die "run this on the client node $CLIENT_NODE ($CLIENT_HOST), after scripts/setup/$BACKEND.py $TOPO deploy-client"
     DBFORK_SERVER_PID=""
-    if [[ $BACKEND == neon ]]; then
+    if [[ $BACKEND == pgcopy ]]; then
+        [[ -f $STATE_DIR/pgcopy_seed.json ]] || die "no $STATE_DIR/pgcopy_seed.json: scripts/setup/pgcopy.py $TOPO seed, deploy-client"
+        [[ -n ${PGCOPY_LOCAL_AGENT:-} ]] || die "PGCOPY_LOCAL_AGENT is empty in $ENV_FILE: this node is not a pgcopy host"
+        curl -sf "$PGCOPY_LOCAL_AGENT/time" > /dev/null || die "the local pgcopy agent $PGCOPY_LOCAL_AGENT does not answer: scripts/setup/pgcopy.py $TOPO start"
+    elif [[ $BACKEND == neon ]]; then
         [[ -n ${NEON_LOCAL_TENANT_ID:-} ]] || die "no seed in $ENV_FILE: run scripts/setup/neon.py $TOPO seed and env-init"
         if [[ $SERVER_SAME_HOST == 1 ]]; then
             DBFORK_SERVER_PID=$(pid_from "$NEON_RUN_DIR/pageserver.pid")
@@ -369,6 +380,7 @@ print_cmd() {  # what a dry run shows for one run
     echo "---- DRY-RUN $name"
     local e; for e in "${RUN_ENV[@]}"; do echo "  env $e"; done
     [[ $BACKEND == neon ]] && echo "  env NEON_LOCAL_COMPUTE_OPTS=${NEON_LOCAL_COMPUTE_OPTS:-}"
+    [[ $BACKEND == pgcopy ]] && echo "  env PGCOPY_INSTANCE_OPTS=${PGCOPY_INSTANCE_OPTS:-}"
     echo "  env DBFORK_SERVER_PID=${DBFORK_SERVER_PID:-} DBFORK_REMOTE_CPU=${DBFORK_REMOTE_CPU:-<from $ENV_FILE>}"
     echo "  env file $ENV_FILE$( [[ -f $ENV_FILE ]] || echo ' (missing)')"
     if [[ $SERVER_SAME_HOST == 1 ]]; then agent_cmd "$name"; echo "  cpu agent: ${AGENT_ARGV[*]} &"; fi

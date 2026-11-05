@@ -1,0 +1,3671 @@
+diff --git a/macrobench/runner.py b/macrobench/runner.py
+index 1716b48..fbc0db5 100644
+--- a/macrobench/runner.py
++++ b/macrobench/runner.py
+@@ -153,6 +153,7 @@ def _capabilities_for(backend) -> dict:
+     from dblib.xata import XataToolSuite
+     from dblib.file_copy import FileCopyToolSuite
+     from dblib.chronos import ChronosToolSuite
++    from dblib.pgcopy import PgCopyToolSuite
+ 
+     table = {
+         tp.Backend.DOLT: DoltToolSuite,
+@@ -164,6 +165,7 @@ def _capabilities_for(backend) -> dict:
+         tp.Backend.XATA: XataToolSuite,
+         tp.Backend.FILE_COPY: FileCopyToolSuite,
+         tp.Backend.CHRONOS: ChronosToolSuite,
++        tp.Backend.PGCOPY: PgCopyToolSuite,
+     }
+     cls = table.get(backend)
+     return cls.capabilities() if cls else {}
+@@ -179,6 +181,7 @@ def _implementation_for(backend) -> dict:
+     from dblib.xata import XataToolSuite
+     from dblib.file_copy import FileCopyToolSuite
+     from dblib.chronos import ChronosToolSuite
++    from dblib.pgcopy import PgCopyToolSuite
+ 
+     table = {
+         tp.Backend.DOLT: DoltToolSuite,
+@@ -190,6 +193,7 @@ def _implementation_for(backend) -> dict:
+         tp.Backend.XATA: XataToolSuite,
+         tp.Backend.FILE_COPY: FileCopyToolSuite,
+         tp.Backend.CHRONOS: ChronosToolSuite,
++        tp.Backend.PGCOPY: PgCopyToolSuite,
+     }
+     cls = table.get(backend)
+     if not cls:
+diff --git a/macrobench/task.proto b/macrobench/task.proto
+index e9ebb1d..c9793b2 100644
+--- a/macrobench/task.proto
++++ b/macrobench/task.proto
+@@ -31,6 +31,7 @@ enum Backend {
+     BAUPLAN = 11;
+     // 12 is TERMINUSDB in microbench/task2.proto
+     NEON_LOCAL = 13;
++    PGCOPY = 14;
+ }
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/microbench/fast_client/patches.py b/microbench/fast_client/patches.py
+index 335791f..a95f401 100644
+--- a/microbench/fast_client/patches.py
++++ b/microbench/fast_client/patches.py
+@@ -145,9 +145,56 @@ def patch_runner2(mod) -> None:
+     cls.track_modified_key = track_modified_key
+     cls.untrack_modified_key = untrack_modified_key
+     sync = patch_cross_node_start(mod)
++    sample = patch_background_sample(mod)
+     _applied.add("runner2")
+     _log(f"active: Faker value pool ({POOL_SIZE}/column), comment-strip fast path, set-based key tracking"
+-         f"{'; cross-node start ' + sync if sync else ''}; {files_md5()}")
++         f"{'; cross-node start ' + sync if sync else ''}"
++         f"{f'; background rows sampled 1/{sample}' if sample > 1 else ''}; {files_md5()}")
++
++
++# ---------------------------------------------------------------- 3b. background row sampling (experiment 13)
++def bg_sample() -> int:
++    """BENCH_BG_SAMPLE=K: background clients record 1 operation in K (default 20 in multi-client mode, else off)."""
++    v = os.environ.get("BENCH_BG_SAMPLE", "")
++    if v.strip():
++        return max(1, int(v))
++    return 20 if os.environ.get("BENCH_SYNC_ADDR") else 1
++
++
++def patch_background_sample(mod) -> int:
++    """The runner keeps every result row in memory until the run ends. Background clients (OperationRunner.run_until,
++    used only by them) running fast operations for minutes produce millions of rows: about 5 GB per client process at
++    pgcopy's ~0.5 ms MIXED ops over a 7-minute window, which ran a 62 GB node out of memory (experiment 13,
++    scaling_branch N = 256). With K > 1 a background client records only every K-th operation (recording is
++    per thread, so the timed workers are untouched): the background load is unchanged, its statement-latency quantiles
++    come from a 1/K sample, and its ops_in_window / throughput in the summary are 1/K of the real ones (multiply by
++    K; scripts/workloads/multi_client/multi_scaling.py run-branch does)."""
++    k = bg_sample()
++    if k <= 1:
++        return 1
++    cls = mod.OperationRunner
++
++    def run_until(self, stopped):
++        rcol = self.context.db_tools.result_collector
++        done = failed = 0
++        first_error = ""
++        i = 0
++        try:
++            while not stopped():
++                rcol.set_recording(i % k == 0)
++                i += 1
++                try:
++                    self.operation.execute(self.context)
++                    done += 1
++                except Exception as e:  # noqa: BLE001 (as the original)
++                    failed += 1
++                    first_error = first_error or f"{type(e).__name__}: {e}"[:300]
++        finally:
++            rcol.set_recording(True)
++        return done, failed, first_error
++
++    cls.run_until = run_until
++    return k
+ 
+ 
+ # ---------------------------------------------------------------- 4. cross-node start
+@@ -238,5 +285,52 @@ def patch_neon_local(mod) -> None:
+     _applied.add("neon_local")
+ 
+ 
++def patch_pgcopy(mod) -> None:
++    """dblib.pgcopy in multi-client mode (experiment 13): as patch_neon_local, setup_run copies this runner's run
++    root without the cluster-wide purge (it would delete the other nodes' instances), teardown_run does nothing."""
++    if "pgcopy" in _applied or not (SYNC_ADDR and SYNC_KEY):
++        return
++
++    def setup_run(db_name, log=print):
++        root = mod.new_run(db_name)
++        mod.create_run_root(root, log=lambda m: log(m + " (multi-client: no purge)"))
++        return root
++
++    def teardown_run(db_name, log=print):
++        log("pgcopy teardown: skipped (multi-client: the orchestrator purges after every node finished)")
++
++    mod.setup_run, mod.teardown_run = setup_run, teardown_run
++    _applied.add("pgcopy")
++
++
++# ---------------------------------------------------------------- 5. background-only nodes (experiment 13)
++HOLD_KEY = os.environ.get("BENCH_HOLD_KEY", "")
++
++
++def patch_branch_ops(mod) -> None:
++    """With BENCH_HOLD_KEY (and BENCH_SYNC_ADDR) set, a node of a multi-node scaling_branch point only keeps its busy
++    branches busy: its runner is the creator runner with --branch-create-ops 1, and that one create, instead of
++    creating a branch, blocks until the coordinator answers GO for BENCH_HOLD_KEY, which it does when the measuring
++    node's creator has finished. The node's timed window (and its background load) thus spans the measuring node's
++    creates; it records no BRANCH row."""
++    if "branch_ops" in _applied or not (SYNC_ADDR and HOLD_KEY):
++        return
++    cls = mod.BranchCreateOperation
++
++    def execute(self, context):
++        host, port = SYNC_ADDR.rsplit(":", 1)
++        t0 = time.time()
++        with socket.create_connection((host, int(port)), timeout=60) as s:
++            s.sendall(f"{HOLD_KEY}\n".encode())
++            s.settimeout(SYNC_TIMEOUT)
++            line = s.makefile("r").readline().strip()
++        print(f"[fast_client] hold {HOLD_KEY}: {line or 'closed'} after {time.time() - t0:.1f}s", file=sys.stderr,
++              flush=True)
++
++    cls.execute = execute
++    _applied.add("branch_ops")
++
++
+ TARGETS = {"microbench.datagen": patch_datagen, "util.sql_parse": patch_sql_parse,
+-           "microbench.runner2": patch_runner2, "dblib.neon_local": patch_neon_local}
++           "microbench.runner2": patch_runner2, "dblib.neon_local": patch_neon_local,
++           "dblib.pgcopy": patch_pgcopy, "microbench.operations.branch": patch_branch_ops}
+diff --git a/microbench/runner2.py b/microbench/runner2.py
+index 390d706..5a85c56 100644
+--- a/microbench/runner2.py
++++ b/microbench/runner2.py
+@@ -70,6 +70,8 @@ from dblib import terminusdb
+ from dblib.terminusdb import TerminusDBToolSuite
+ from dblib import neon_local
+ from dblib.neon_local import NeonLocalToolSuite
++from dblib import pgcopy
++from dblib.pgcopy import PgCopyToolSuite
+ from dblib.db_api import DBToolSuite, Ref
+ from dblib import result_collector as rc
+ 
+@@ -213,9 +215,9 @@ class BenchmarkConfig:
+         # A seed database to copy from needs the Dolt revision-database naming.
+         if (self.source == "generated" and self.generated.seed_db
+                 and self._proto.backend not in (tp.Backend.DOLT, tp.Backend.DOLT_MYSQL,
+-                                                tp.Backend.NEON_LOCAL)):
+-            raise ValueError("database_setup.generated.seed_db is supported on DOLT, DOLT_MYSQL "
+-                             "and NEON_LOCAL only")
++                                                tp.Backend.NEON_LOCAL, tp.Backend.PGCOPY)):
++            raise ValueError("database_setup.generated.seed_db is supported on DOLT, DOLT_MYSQL, "
++                             "NEON_LOCAL and PGCOPY only")
+ 
+         # Validate operation is registered
+         op_type = op_bench.operation
+@@ -431,6 +433,10 @@ def create_db_tools(
+         return NeonLocalToolSuite.init_for_bench(
+             result_collector, db_name, default_branch, measure_storage
+         )
++    if backend == tp.Backend.PGCOPY:
++        return PgCopyToolSuite.init_for_bench(
++            result_collector, db_name, default_branch, measure_storage
++        )
+     if backend == tp.Backend.NEON:
+         return NeonToolSuite.init_for_bench(
+             result_collector,
+@@ -592,6 +598,10 @@ class BackendManager:
+             # timeline, which already holds the data (see dblib/neon_local.py).
+             info.default_branch_name = neon_local.MAIN_BRANCH
+ 
++        elif backend == tp.Backend.PGCOPY:
++            # The run root ("main") is an instance copied from the seed instance (see dblib/pgcopy.py).
++            info.default_branch_name = pgcopy.MAIN_BRANCH
++
+         elif backend == tp.Backend.XATA:
+             if require_db_setup:
+                 (
+@@ -627,6 +637,8 @@ class BackendManager:
+             bauplan.setup_database(db_name, sql_dump_path)
+         elif require_db_setup and backend == tp.Backend.NEON_LOCAL:
+             neon_local.setup_run(db_name)
++        elif require_db_setup and backend == tp.Backend.PGCOPY:
++            pgcopy.setup_run(db_name)
+         elif require_db_setup:
+             self._create_database(info.default_uri, db_name)
+ 
+@@ -685,6 +697,12 @@ class BackendManager:
+                 neon_local.teardown_run(db_name)
+             except Exception as e:
+                 print(f"Error cleaning up neon_local: {e}")
++        elif self.config.backend == tp.Backend.PGCOPY and db_name:
++            try:
++                # Every instance of the run (the seed instance stays).
++                pgcopy.teardown_run(db_name)
++            except Exception as e:
++                print(f"Error cleaning up pgcopy: {e}")
+         elif self.config.backend == tp.Backend.BAUPLAN and db_name:
+             try:
+                 # The run's branches, tags and S3 files.
+@@ -839,6 +857,11 @@ def seed_generated_database(backend: int, backend_info: BackendInfo, db_name: st
+         log(f"NEON_LOCAL: run root branched from the seed timeline ({gen.seed_db}); nothing to copy")
+         return {"source": "generated", "scale_factor": schema.scale_factor, "rows": {},
+                 "seed_db": gen.seed_db, "seed_db_created": False, "seed_sec": 0.0}
++    if backend == tp.Backend.PGCOPY and gen.seed_db:
++        # The run root is a copy of the seed instance: the data is there.
++        log(f"PGCOPY: run root copied from the seed instance ({gen.seed_db}); nothing to copy")
++        return {"source": "generated", "scale_factor": schema.scale_factor, "rows": {},
++                "seed_db": gen.seed_db, "seed_db_created": False, "seed_sec": 0.0}
+     seeded_now = False
+     if gen.seed_db:
+         seeded_now = ensure_seed_database(backend, gen, scale_factor, log=log, schema=schema)
+@@ -3346,6 +3369,7 @@ class ResultManager:
+         suite_class = {
+             tp.Backend.CHRONOS: ChronosToolSuite,
+             tp.Backend.TERMINUSDB: TerminusDBToolSuite,
++            tp.Backend.PGCOPY: PgCopyToolSuite,
+         }.get(self.config.backend)
+         observed = getattr(suite_class, "OBSERVED", None)
+         if observed:
+diff --git a/microbench/task2.proto b/microbench/task2.proto
+index 84d3596..6edcb19 100644
+--- a/microbench/task2.proto
++++ b/microbench/task2.proto
+@@ -15,6 +15,7 @@ enum Backend {
+   BAUPLAN = 11;
+   TERMINUSDB = 12;
+   NEON_LOCAL = 13;  // self-hosted Neon cluster (dblib/neon_local.py)
++  PGCOPY = 14;      // branch = pg_basebackup copy to a node + a new PostgreSQL instance (dblib/pgcopy.py)
+ }
+ 
+ // Operation types for benchmarking
+diff --git a/scripts/run_throughput_bench.sh b/scripts/run_throughput_bench.sh
+index afab89f..4a72cd6 100755
+--- a/scripts/run_throughput_bench.sh
++++ b/scripts/run_throughput_bench.sh
+@@ -206,7 +206,7 @@ if [ -z "$BACKEND" ] || [ -z "$SWEEP_MODE" ]; then
+     echo "Usage: $0 <backend> [<sql_dump_path>] {--sweep-concurrency | --sweep-branches | --sweep-proportional | --sweep-threads} [options]"
+     echo ""
+     echo "Required arguments:"
+-    echo "  backend: dolt, dolt_mysql, seekdb, neon, neon_local, xata, file_copy"
++    echo "  backend: dolt, dolt_mysql, seekdb, neon, neon_local, xata, file_copy, pgcopy"
+     echo "  sql_dump_path: Path to SQL dump file (omit to generate CH-benCHmark data, see --generated-scale)"
+     echo "  --sweep-concurrency: Fix threads/branches, vary concurrent requests (requires --threads and --branches; async only)"
+     echo "  --sweep-branches: Fix threads, vary branches (requires --threads)"
+@@ -275,7 +275,7 @@ BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
+ BACKEND_LOWER=$(echo "$BACKEND" | tr '[:upper:]' '[:lower:]')
+ 
+ # Validate backend
+-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|NEON_LOCAL|XATA|FILE_COPY)$ ]]; then
++if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|NEON_LOCAL|XATA|FILE_COPY|PGCOPY)$ ]]; then
+     echo "Error: Invalid backend '$BACKEND'"
+     exit 1
+ fi
+@@ -299,8 +299,8 @@ if [ -n "$SQL_DUMP_PATH" ] && [ ! -f "$SQL_DUMP_PATH" ]; then
+     echo "Error: SQL dump file not found: $SQL_DUMP_PATH"
+     exit 1
+ fi
+-if [ -n "$SEED_DB" ] && [[ ! "$BACKEND" =~ ^(dolt|dolt_mysql|neon_local)$ ]]; then
+-    echo "Error: --seed-db is supported on dolt, dolt_mysql and neon_local only"
++if [ -n "$SEED_DB" ] && [[ ! "$BACKEND" =~ ^(dolt|dolt_mysql|neon_local|pgcopy)$ ]]; then
++    echo "Error: --seed-db is supported on dolt, dolt_mysql, neon_local and pgcopy only"
+     exit 1
+ fi
+ 
+diff --git a/scripts/setup/nodes.py b/scripts/setup/nodes.py
+index aaeb712..d3de9f5 100644
+--- a/scripts/setup/nodes.py
++++ b/scripts/setup/nodes.py
+@@ -218,17 +218,18 @@ WantedBy=multi-user.target
+     # cpu_agent.py files any descendant of the pageserver under walredo first
+     CPU_COMM_GROUPS = {"pageserver": "pageserver", "safekeeper": "safekeeper", "storcon": "storage_control",
+                        "broker": "storage_broker", "compute_ctl": "compute_ctl", "computes": "postgres",
+-                       "doltgres": "doltgres"}
++                       "doltgres": "doltgres", "copy": "pg_basebackup"}
+ 
+-    def cpu_agent_service(self, node: Node, svc_dir: str) -> None:
++    def cpu_agent_service(self, node: Node, svc_dir: str, bind: str = "0.0.0.0") -> None:
+         """One scripts/setup/cpu_agent.py unit per remote node, shared by Neon and Doltgres (they may share a node,
+         and the runner's DBFORK_REMOTE_CPU expects ports.cpu_agent): sets server (+ clients when configured), every
+         backend's process groups by name, the disk and the server's memory node. Service mode: no CSV. Left running
+-        by `stop`, it is cheap and the other backend may use it."""
++        by `stop`, it is cheap and the other backend may use it. bind: the address it listens on (pgcopy: the node's
++        LAN address; the nodes' public interfaces face the internet)."""
+         script = f"{svc_dir}/cpu_agent.py"
+         self.rsync(node, str(Path(__file__).with_name("cpu_agent.py")), script)
+         server = node.cpus_csv("server") or (f"node:{node.server_numa}" if node.server_numa else "all")
+-        argv = ["python3", script, "--port", str(self.topo.ports["cpu_agent"]), "--bind", "0.0.0.0",
++        argv = ["python3", script, "--port", str(self.topo.ports["cpu_agent"]), "--bind", bind,
+                 "--set", f"server={server}"]
+         clients = node.cpus_csv("client") or (f"node:{node.client_numa}" if node.client_numa else "")
+         if clients:
+diff --git a/scripts/setup/topo.py b/scripts/setup/topo.py
+index eee5678..8377365 100755
+--- a/scripts/setup/topo.py
++++ b/scripts/setup/topo.py
+@@ -18,6 +18,11 @@ Addresses: a role on the same host as the viewer is reached on a Unix socket (Ne
+ on another host in the same zone on its LAN address; in another zone on its public address (CloudLab LANs of
+ different sites do not route to each other).
+ 
++pgcopy (experiment 13): a seed node (the seed instance and every run root) and host nodes (branch instances, each
++with its benchmark client: co-located). Its agents and instances listen on LAN addresses only, so its addresses are
++always LAN addresses, also from the node itself (no loopback; the client connects to its own instances on
++127.0.0.1 through dblib/pgcopy.py).
++
+ Neon transport "rdma" (experiment 12): every service-to-service Postgres-protocol connection (GetPage, WAL push, WAL
+ pull, basebackup) runs over an RDMA byte stream: listeners `rdma:0.0.0.0:<port>`, peers `rdma:<ip>:<port>`. RDMA has
+ no loopback device, so a role on the viewer's own host is reached on the host's LAN address. HTTP endpoints stay TCP
+@@ -38,6 +43,7 @@ LOCAL = "local"
+ PORT_DEFAULTS = {  # experiment 5's ports
+     "storcon": 1234, "storcon_pg": 1235, "broker": 50051, "hook": 9999, "ps_http": 9898, "ps_pg": 64000,
+     "sk_pg": 5454, "sk_http": 7676, "agent": 9000, "cpu_agent": 9010, "doltgres": 5433,
++    "pgcopy_agent": 9100, "pgcopy_pg": 24000,
+ }
+ 
+ WORKLOAD_DEFAULTS = {  # experiment 8's (the user's defaults since 3 Nov 2026; experiment 5 used W=4, prewarm 3400)
+@@ -191,10 +197,13 @@ class Topo:
+         self.nodes = {n: Node(n, d, self) for n, d in nodes.items()}
+         self.neon = r.get("neon")
+         self.doltgres = r.get("doltgres")
++        self.pgcopy = r.get("pgcopy")
+         if self.neon:
+             self._check_neon()
+         if self.doltgres:
+             self._check_doltgres()
++        if self.pgcopy:
++            self._check_pgcopy()
+ 
+     # ---- validation ----
+     def node(self, name: str) -> Node:
+@@ -251,6 +260,56 @@ class Topo:
+             self.node(d[r])
+         d.setdefault("version", "1.4.0")
+ 
++    def _check_pgcopy(self) -> None:
++        p = self.pgcopy
++        if "seed" not in p:
++            raise TopoError("[pgcopy] needs seed = <node>")
++        self.node(p["seed"])
++        if not p.get("hosts"):
++            raise TopoError("[pgcopy] needs hosts = [<node>, ...]")
++        for x in p["hosts"]:
++            self.node(x)
++        if len(set(p["hosts"])) != len(p["hosts"]):
++            raise TopoError("[pgcopy] hosts must be distinct")
++        if p["seed"] in p["hosts"]:
++            raise TopoError("[pgcopy] the seed node cannot also be a host (a branch there would be a local copy)")
++        p.setdefault("client", p["hosts"][0])
++        if p["client"] not in p["hosts"]:
++            raise TopoError("[pgcopy] client must be one of the hosts (clients are co-located with their branches)")
++        p.setdefault("pg_version", 17)
++        for x in [p["seed"], *p["hosts"]]:
++            nd = self.node(x)
++            if nd.local or nd.lan in (None, "127.0.0.1", "localhost"):
++                raise TopoError(f"[pgcopy] node {x} needs a real 'lan' address (agents listen on the LAN only)")
++
++    def pgcopy_nodes(self) -> list[Node]:
++        p = self.pgcopy
++        return [self.node(x) for x in dict.fromkeys([p["seed"], *p["hosts"]])]
++
++    def pgcopy_root(self, node: Node) -> str:
++        return node.d.get("pgcopy_root", f"{node.data_root}/pgcopy")
++
++    def pgcopy_agent_url(self, node: Node) -> str:
++        return f"http://{node.lan}:{self.ports['pgcopy_agent']}"
++
++    def pgcopy_env(self, viewer_name: str | None = None, seeding: bool = False) -> dict:
++        """PGCOPY_* (+ DBFORK_REMOTE_CPU) for a runner on `viewer` (default: the client). Agents by LAN address."""
++        p = self.pgcopy
++        viewer = self.node(viewer_name or p["client"])
++        w = self.wl("pgcopy")
++        env = {
++            "PGCOPY_AGENTS": ",".join(self.pgcopy_agent_url(self.node(x)) for x in p["hosts"]),
++            "PGCOPY_ROOT_AGENT": self.pgcopy_agent_url(self.node(p["seed"])),
++            "PGCOPY_LOCAL_AGENT": self.pgcopy_agent_url(viewer) if viewer.name in p["hosts"] else "",
++            "PGCOPY_SEED_INSTANCE": "seed",
++            "PGCOPY_PG_USER": "bench",
++            "PGCOPY_PG_PASSWORD": "bench",
++            "PGCOPY_DB": "bench",
++            "PGCOPY_SHARED_BUFFERS": w["seed_shared_buffers"] if seeding else w["shared_buffers"],
++            "DBFORK_REMOTE_CPU": "" if seeding else self.remote_cpu("pgcopy", viewer),
++        }
++        return env
++
+     # ---- roles ----
+     def neon_nodes(self) -> list[str]:
+         n = self.neon
+@@ -259,8 +318,11 @@ class Topo:
+             out += n[r]
+         return list(dict.fromkeys(out))
+ 
++    def section(self, backend: str | None) -> dict | None:
++        return {"neon": self.neon, "doltgres": self.doltgres, "pgcopy": self.pgcopy}.get(backend or "")
++
+     def role_node(self, backend: str, role: str) -> Node:
+-        sec = self.neon if backend == "neon" else self.doltgres
++        sec = self.section(backend)
+         if not sec:
+             raise TopoError(f"topology has no [{backend}] section")
+         return self.node(sec[role])
+@@ -270,7 +332,7 @@ class Topo:
+ 
+     def wl(self, backend: str | None) -> dict:
+         """Workload parameters: [workload], overridden by [neon.workload] / [doltgres.workload]."""
+-        sec = (self.neon if backend == "neon" else self.doltgres if backend == "doltgres" else None) or {}
++        sec = self.section(backend) or {}
+         over = sec.get("workload", {})
+         unknown = set(over) - set(WORKLOAD_DEFAULTS)
+         if unknown:
+@@ -398,6 +460,8 @@ class Topo:
+ 
+     # ---- CPU sampling (scripts/setup/cpu_agent.py on every server node) ----
+     def server_nodes(self, backend: str) -> list[Node]:
++        if backend == "pgcopy":
++            return self.pgcopy_nodes()
+         if backend == "neon":
+             n = self.neon
+             other_roles = [n[r] for r in NEON_ROLES_ONE if r != "client"] + sum((n[r] for r in NEON_ROLES_MANY), [])
+@@ -408,6 +472,17 @@ class Topo:
+         """DBFORK_REMOTE_CPU for runner2's RemoteCpuSampler: label=url;... One label per server node ('server'
+         when there is one, else the node name), plus per-group labels of the single-host Neon deployment."""
+         port = self.ports["cpu_agent"]
++        if backend == "pgcopy":
++            # the viewer's own node (its instances and its clients) and the seed node (every copy reads from it);
++            # LAN addresses: the CPU agents listen on the LAN only. Groups: postgres processes, pg_basebackup.
++            p = self.pgcopy
++            seed = self.node(p["seed"])
++            out = []
++            if viewer.name in p["hosts"]:
++                base = f"http://{viewer.lan}:{port}/cpu"
++                out += [f"server={base}?set=server", f"computes={base}?group=computes", f"copy={base}?group=copy"]
++            out.append(f"seed=http://{seed.lan}:{port}/cpu?set=server")
++            return ";".join(out)
+         nodes = self.server_nodes(backend)
+         out = []
+         for nd in nodes:
+@@ -442,22 +517,28 @@ class Topo:
+         }
+         if backend:
+             c = self.client(backend)
+-            srv = (self.node(self.neon["storcon"]) if backend == "neon" else self.node(self.doltgres["server"]))
++            srv = (self.node(self.neon["storcon"]) if backend == "neon" else
++                   c if backend == "pgcopy" else self.node(self.doltgres["server"]))
+             v.update({
+                 "BACKEND": backend,
+                 "CLIENT_NODE": c.name, "CLIENT_HOST": c.host, "CLIENT_IS_LOCAL": int(c.is_here()),
+                 "CLIENT_CPUS": c.cpus_csv("client"), "CLIENT_MEM": c.client_mem, "CLIENT_NUMA": c.client_numa,
+                 "SERVER_NODE": srv.name, "SERVER_CPUS": srv.cpus_csv("server"), "SERVER_MEM": srv.server_mem,
+                 "SERVER_NUMA": srv.server_numa,
+-                "SERVER_SAME_HOST": int(srv.host == c.host),
++                # pgcopy: the instances share the client's node, but there is no single server process to watch
++                # (no DBFORK_SERVER_PID, no per-run CPU agent): the node's CPU agent runs as a service
++                "SERVER_SAME_HOST": 0 if backend == "pgcopy" else int(srv.host == c.host),
+                 "MAX_PROCS": self.max_procs(backend),
+                 "ENV_FILE": f"{self.state_dir}/{backend}.env",
+-                "SEED_DB": "bench" if backend == "neon" else f"ch_w{w['W']}_seed",
+-                "RUNNER_BACKEND": "neon_local" if backend == "neon" else "dolt",
++                "SEED_DB": "bench" if backend in ("neon", "pgcopy") else f"ch_w{w['W']}_seed",
++                "RUNNER_BACKEND": {"neon": "neon_local", "pgcopy": "pgcopy"}.get(backend, "dolt"),
+             })
+             if backend == "neon":
+                 v["NEON_RUN_DIR"] = self.neon_run_dir()
+                 v["NEON_TRANSPORT"] = self.neon["transport"]
++            if backend == "pgcopy":
++                v["PGCOPY_HOSTS"] = ",".join(self.pgcopy["hosts"])
++                v["PGCOPY_SEED_NODE"] = self.pgcopy["seed"]
+         return v
+ 
+ 
+@@ -479,6 +560,8 @@ def write_env(topo: Topo, backend: str, view: str | None = None, out: str | None
+               seeding: bool = False) -> Path:
+     if backend == "neon":
+         env = topo.neon_env(view, read_seed(topo, "neon"), seeding=seeding)
++    elif backend == "pgcopy":
++        env = topo.pgcopy_env(view, seeding=seeding)
+     else:
+         env = topo.doltgres_env(view)
+     path = Path(out or f"{topo.state_dir}/{backend}.env")
+@@ -493,7 +576,7 @@ def get_key(topo: Topo, key: str):
+     cur = topo.raw
+     if key.startswith("workload."):
+         return topo.workload[key.split(".", 1)[1]]
+-    for b in ("neon", "doltgres"):
++    for b in ("neon", "doltgres", "pgcopy"):
+         if key.startswith(f"{b}.workload."):
+             return topo.wl(b)[key.split(".", 2)[2]]
+     if key.startswith("ports."):
+@@ -509,10 +592,10 @@ def main(argv=None) -> int:
+     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+     sub = ap.add_subparsers(dest="cmd", required=True)
+     p = sub.add_parser("check"); p.add_argument("topo")
+-    p = sub.add_parser("shell"); p.add_argument("topo"); p.add_argument("--backend", choices=["neon", "doltgres"])
++    p = sub.add_parser("shell"); p.add_argument("topo"); p.add_argument("--backend", choices=["neon", "doltgres", "pgcopy"])
+     p = sub.add_parser("get"); p.add_argument("topo"); p.add_argument("key")
+     p = sub.add_parser("env"); p.add_argument("topo"); p.add_argument("--backend", required=True,
+-                                                                    choices=["neon", "doltgres"])
++                                                                    choices=["neon", "doltgres", "pgcopy"])
+     p.add_argument("--view"); p.add_argument("--out"); p.add_argument("--seeding", action="store_true")
+     a = ap.parse_args(argv)
+     try:
+@@ -529,6 +612,10 @@ def main(argv=None) -> int:
+             if t.doltgres:
+                 print(f"  doltgres {t.doltgres['version']}: server={t.doltgres['server']} "
+                       f"client={t.doltgres['client']}")
++            if t.pgcopy:
++                p = t.pgcopy
++                print(f"  pgcopy (PostgreSQL {p['pg_version']}): seed={p['seed']} client={p['client']} "
++                      f"hosts={p['hosts']}")
+             print(f"  workload: W={t.workload['W']} SB={t.workload['shared_buffers']} LFC={t.workload['lfc_mb']}MB "
+                   f"ns_data={t.workload['ns_data']} ns_branch={t.workload['ns_branch']}")
+         elif a.cmd == "shell":
+diff --git a/scripts/workloads/ceiling_check.py b/scripts/workloads/ceiling_check.py
+index e6ac2f5..7fc2145 100755
+--- a/scripts/workloads/ceiling_check.py
++++ b/scripts/workloads/ceiling_check.py
+@@ -15,6 +15,11 @@ statements (heap prefix, then stock_pkey); purged at the end.
+ Doltgres: a fresh database copied from the seed (the runner's helpers), branches rc_0..rc_{max(N)-1} of its main,
+ one connection per branch to "<db>/rc_i" (experiment 7's client: psycopg AsyncClientCursor); the database is
+ dropped at the end.
++pgcopy (experiment 13): a run root copied from the seed instance, then max(N) instances copied from it onto this
++node's agent (PGCOPY_LOCAL_AGENT; 16 at a time), each prewarmed like Neon's computes, connections on 127.0.0.1.
++Several nodes at once (scripts/workloads/multi_client/multi_scaling.py run-ceiling): --ns-local gives this node's
++share of each N in --ns, --sync-addr/--sync-prefix start every measurement on every node together (GO per kind and
++N from the coordinator), --no-purge leaves the other nodes' instances alone; rows carry busy_branches_total.
+ 
+     uv run python scripts/workloads/ceiling_check.py --topology T --backend neon|doltgres \\
+         [--ns 128,256,512,1024] [--kinds point,range,insert,update] [--seconds 30] [--procs MAX_PROCS] \\
+@@ -72,6 +77,11 @@ class _Keys:
+ 
+ async def _connect(backend, target, env):
+     import psycopg
++    if backend == "pgcopy":
++        host, port = target
++        return await psycopg.AsyncConnection.connect(
++            host=host, port=port, dbname=env.get("PGCOPY_DB", "bench"), user=env.get("PGCOPY_PG_USER", "bench"),
++            password=env.get("PGCOPY_PG_PASSWORD", ""), autocommit=True)
+     if backend == "neon":
+         host, port = target
+         return await psycopg.AsyncConnection.connect(
+@@ -131,14 +141,30 @@ def server_cpu():
+         return None
+ 
+ 
+-def measure(backend, targets, kind, seconds, procs, w, W):
++def sync_go(addr, key):
++    """Wait for the coordinator's GO for key (multi-node ceiling: every node's measurement starts together)."""
++    import socket
++    host, port = addr.rsplit(":", 1)
++    with socket.create_connection((host, int(port)), timeout=60) as s:
++        s.sendall(f"{key}\n".encode())
++        s.settimeout(3600)
++        line = s.makefile("r").readline().strip()
++    if line != "GO":
++        raise RuntimeError(f"ceiling sync {key}: {line or 'coordinator closed the connection'}")
++
++
++def measure(backend, targets, kind, seconds, procs, w, W, sync=None):
+     from microbench.runner2 import RemoteCpuSampler
+     n = len(targets)
+     nproc = min(procs, n)
+     groups = [targets[i::nproc] for i in range(nproc)]
+     ctx = mp.get_context("spawn")
+     out = ctx.Queue()
+-    start_at = time.time() + 5 + n / 50
++    if sync:
++        sync_go(*sync)    # then a common start, a few seconds out (clocks NTP-synchronised)
++        start_at = time.time() + 3 + 1024 / 50
++    else:
++        start_at = time.time() + 5 + n / 50
+     env = dict(os.environ)
+     ps = [ctx.Process(target=_proc, args=(backend, g, kind, seconds, start_at, out, w, 200_000 + 50_000_000 * j,
+                                           W, env))
+@@ -178,12 +204,13 @@ def measure(backend, targets, kind, seconds, procs, w, W):
+     return row
+ 
+ 
+-def neon_prewarm(target, stmts):
++def neon_prewarm(target, stmts, prefix="NEON_LOCAL"):
+     import psycopg2
+     host, port = target
+-    c = psycopg2.connect(host=host, port=port, dbname=os.environ.get("NEON_LOCAL_DB", "bench"),
+-                         user=os.environ.get("NEON_LOCAL_PG_USER", "bench"),
+-                         password=os.environ.get("NEON_LOCAL_PG_PASSWORD", ""), connect_timeout=60)
++    db = os.environ.get(f"{prefix}_DB", "bench")
++    c = psycopg2.connect(host=host, port=port, dbname=db,
++                         user=os.environ.get(f"{prefix}_PG_USER", "bench"),
++                         password=os.environ.get(f"{prefix}_PG_PASSWORD", ""), connect_timeout=60)
+     c.autocommit = True
+     with c.cursor() as cur:
+         for s in stmts:
+@@ -207,8 +234,12 @@ def dolt_branches(n, create):
+ def main():
+     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+     ap.add_argument("--topology", required=True)
+-    ap.add_argument("--backend", required=True, choices=["neon", "doltgres"])
++    ap.add_argument("--backend", required=True, choices=["neon", "doltgres", "pgcopy"])
+     ap.add_argument("--ns", default="128,256,512,1024")
++    ap.add_argument("--ns-local", default="", help="pgcopy, several nodes: this node's share of each N in --ns")
++    ap.add_argument("--sync-addr", default="", help="coordinator host:port (several nodes)")
++    ap.add_argument("--sync-prefix", default="", help="key prefix: GO per <prefix>.<kind>.<N>")
++    ap.add_argument("--no-purge", action="store_true", help="pgcopy: keep the other nodes' instances (several nodes)")
+     ap.add_argument("--kinds", default="point,range,insert,update")
+     ap.add_argument("--seconds", type=float, default=30)
+     ap.add_argument("--procs", type=int, help="client processes at most (default: the topology's MAX_PROCS)")
+@@ -223,10 +254,14 @@ def main():
+         raise SystemExit("--out or --outdir is required")
+     out = Path(args.out) if args.out else out_root(args.outdir, args.backend, "scaling_data", False) / "ceiling_check.csv"
+     ns = [int(x) for x in args.ns.split(",")]
++    ns_local = [int(x) for x in args.ns_local.split(",")] if args.ns_local else list(ns)
++    if len(ns_local) != len(ns):
++        raise SystemExit("--ns-local needs one share per --ns entry")
++    sync = (args.sync_addr, args.sync_prefix) if args.sync_addr else None
+     kinds = args.kinds.split(",")
+     blocks = int(v["PREWARM_HEAP_BLOCKS"])
+     stmts = ["SET maintenance_io_concurrency = 128", f"SELECT pg_prewarm('stock', 'buffer', 'main', 0, {blocks - 1})",
+-             "SELECT pg_prewarm('stock_pkey')"] if args.backend == "neon" else []
++             "SELECT pg_prewarm('stock_pkey')"] if args.backend in ("neon", "pgcopy") else []
+     opts = neon_compute_opts(int(v["LFC_MB"]), statement_log=False, pgdata_on_disk=True) if args.backend == "neon" else {}
+     print(f"ceiling check ({args.backend}): W={W} ns={ns} kinds={kinds} seconds={args.seconds} procs<={procs} "
+           f"compute_opts={opts} prewarm={len(stmts)} statements out={out}", flush=True)
+@@ -234,7 +269,33 @@ def main():
+         return
+     out.parent.mkdir(parents=True, exist_ok=True)
+     rows = []
+-    if args.backend == "neon":
++    if args.backend == "pgcopy":
++        from dblib import pgcopy as pc
++        os.environ["PGCOPY_INSTANCE_OPTS"] = json.dumps({"statement_log": False})
++        if args.no_purge:
++            root = pc.new_run("ceiling")
++            pc.create_run_root(root)
++        else:
++            pc.setup_run("ceiling")
++        try:
++            k = max(ns_local)
++            names = [f"cc_{i}" for i in range(k)]
++            t0 = time.time()
++            agent = pc.local_agent()
++            with ThreadPoolExecutor(16) as ex:
++                made = list(ex.map(lambda nm: pc.create_instance(pc.instance_id_for(nm), pc.instance_id_for("main"),
++                                                                 agent=agent or None), names))
++            targets = [(pc.connect_host(r["agent"], r["host"]), int(r["port"])) for r in made]
++            print(f"{len(targets)} instances ready in {time.time() - t0:.0f}s", flush=True)
++            t0 = time.time()
++            with ThreadPoolExecutor(32) as ex:
++                list(ex.map(lambda t: neon_prewarm(t, stmts, "PGCOPY"), targets))
++            print(f"prewarmed {len(targets)} instances in {time.time() - t0:.0f}s", flush=True)
++            rows = sweep("pgcopy", targets, kinds, ns, args.seconds, procs, W, ns_local=ns_local, sync=sync)
++        finally:
++            if not args.no_purge:
++                pc.teardown_run("ceiling")
++    elif args.backend == "neon":
+         os.environ["NEON_LOCAL_COMPUTE_OPTS"] = json.dumps(opts)
+         from dblib import neon_local as nl
+         nl.setup_run("ceiling")
+@@ -270,13 +331,18 @@ def main():
+         print("wrote", out)
+ 
+ 
+-def sweep(backend, targets, kinds, ns, seconds, procs, W):
++def sweep(backend, targets, kinds, ns, seconds, procs, W, ns_local=None, sync=None):
+     rows = []
+     w = W
+     for kind in kinds:
+-        for n in ns:
++        for j, n in enumerate(ns):
+             w += 1
+-            r = measure(backend, targets[:n], kind, seconds, procs, w, W)
++            k = ns_local[j] if ns_local else n
++            if k == 0:   # no share of this N on this node (several nodes): not part of the measurement
++                continue
++            key = (sync[0], f"{sync[1]}.{kind}.{n}") if sync else None
++            r = measure(backend, targets[:k], kind, seconds, procs, w, W, sync=key)
++            r["busy_branches_total"] = n
+             print(r, flush=True)
+             rows.append(r)
+     return rows
+diff --git a/scripts/workloads/cold_start.py b/scripts/workloads/cold_start.py
+index 326fc29..69103f5 100755
+--- a/scripts/workloads/cold_start.py
++++ b/scripts/workloads/cold_start.py
+@@ -17,6 +17,11 @@ connection to the database (timed: first_connect_ms) and SELECT dolt_checkout('c
+ checkout_ms; dblib/dolt.py switches branches the same way), then the same reads. Branches and the database are
+ dropped at the end.
+ 
++pgcopy (experiment 13): a new instance copied from the run root onto this node's agent (PGCOPY_LOCAL_AGENT) and
++started (timed together: create_ms; the agent's split: copy_ms, start_ms, bytes), the first psycopg2 connection on
++127.0.0.1 (first_connect_ms), the reads, then the instance is deleted. Its 40 MB shared_buffers start empty; the OS
++page cache holds the files the copy just wrote (warm), which the report notes.
++
+ Reads: SELECT * FROM stock WHERE s_w_id = %s AND s_i_id = %s with w uniform in [1, W], i in [1, 100000],
+ random.Random(1000 + k) (the runner's READ; keys are dense, no key scan).
+ 
+@@ -56,7 +61,8 @@ def workload_env(topology: str, backend: str, dry: bool = False) -> dict:
+     kept). Call before importing dblib (dblib/dolt.py reads DOLT_* at import)."""
+     v = topo_mod.Topo(topology).shell_vars(backend)
+     for k in list(os.environ):
+-        if k.startswith("NEON_LOCAL_") or (k.startswith("DBFORK_") and k != "DBFORK_SERVER_PID") or k in CLEARED:
++        if (k.startswith("NEON_LOCAL_") or k.startswith("PGCOPY_") or (k.startswith("DBFORK_") and k != "DBFORK_SERVER_PID")
++                or k in CLEARED):
+             del os.environ[k]
+     env_file = Path(v["ENV_FILE"])
+     if env_file.exists():
+@@ -174,6 +180,31 @@ def neon_run(k, args, W, out):
+     return finish(rows, k, out, meta)
+ 
+ 
++def pgcopy_run(k, args, W, out):
++    import psycopg2
++    from dblib import pgcopy as pc
++    name = f"cold_{k}"
++    iid = pc.instance_id_for(name)
++    t_create0 = time.time()
++    r = pc.create_instance(iid, pc.instance_id_for(pc.MAIN_BRANCH), agent=pc.local_agent() or None, start=True)
++    t_ready = time.time()
++    host = pc.connect_host(r["agent"], r["host"])
++    conn = psycopg2.connect(host=host, port=r["port"], dbname=os.environ.get("PGCOPY_DB", "bench"),
++                            user=os.environ.get("PGCOPY_PG_USER", "bench"),
++                            password=os.environ.get("PGCOPY_PG_PASSWORD", ""), connect_timeout=60)
++    conn.autocommit = True
++    t_conn = time.time()
++    rows = reads(conn, k, args.reads, W, "pgcopy")
++    conn.close()
++    pc.delete_instance(iid, r["agent"])
++    meta = {"run": k, "branch": name, "instance": iid, "agent": r["agent"], "host": host,
++            "t_create_start": t_create0, "t_compute_ready": t_ready, "t_connected": t_conn,
++            "create_ms": (t_ready - t_create0) * 1e3, "agent_copy_ms": r.get("copy_ms"),
++            "agent_start_ms": r.get("start_ms"), "copied_bytes": r.get("bytes"),
++            "first_connect_ms": (t_conn - t_ready) * 1e3}
++    return finish(rows, k, out, meta)
++
++
+ def dolt_run(k, args, W, out, admin, db):
+     import psycopg2
+     name = f"cold_{k}"
+@@ -200,7 +231,7 @@ def dolt_run(k, args, W, out, admin, db):
+ def main():
+     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+     ap.add_argument("--topology", required=True)
+-    ap.add_argument("--backend", required=True, choices=["neon", "doltgres"])
++    ap.add_argument("--backend", required=True, choices=["neon", "doltgres", "pgcopy"])
+     ap.add_argument("--outdir", required=True)
+     ap.add_argument("--runs", type=int, help="default: the topology's cold_runs (smoke: 1)")
+     ap.add_argument("--reads", type=int, help="default: the topology's cold_reads (smoke: 3000)")
+@@ -220,6 +251,10 @@ def main():
+         agents = [a.strip() for a in os.environ.get("NEON_LOCAL_AGENTS", "").split(",") if a.strip()]
+         plan = {"compute_opts": opts, "agent": agents[0] if agents else None,
+                 "shared_buffers": os.environ.get("NEON_LOCAL_SHARED_BUFFERS")}
++    elif args.backend == "pgcopy":
++        opts = {"statement_log": True}
++        plan = {"instance_opts": opts, "agent": os.environ.get("PGCOPY_LOCAL_AGENT"),
++                "shared_buffers": os.environ.get("PGCOPY_SHARED_BUFFERS")}
+     else:
+         opts = {}
+         plan = {"seed_db": v["SEED_DB"], "database": "cold_start",
+@@ -237,7 +272,19 @@ def main():
+             return
+     metas = []
+     common = {"backend": args.backend, "W": W, "reads": args.reads, "pause_s": args.pause, "topology": v["TOPO_NAME"]}
+-    if args.backend == "neon":
++    if args.backend == "pgcopy":
++        os.environ["PGCOPY_INSTANCE_OPTS"] = json.dumps(opts)
++        from dblib import pgcopy as pc
++        pc.setup_run("cold")
++        try:
++            for k in range(1, args.runs + 1):
++                metas.append(pgcopy_run(k, args, W, out))
++                runs_json.write_text(json.dumps({**common, "instance_opts": opts, "agent": plan["agent"],
++                                                 "runs": metas}, indent=2))
++                time.sleep(args.pause)
++        finally:
++            pc.teardown_run("cold")
++    elif args.backend == "neon":
+         os.environ["NEON_LOCAL_COMPUTE_OPTS"] = json.dumps(opts)
+         if not plan["agent"]:
+             raise SystemExit("NEON_LOCAL_AGENTS is empty")
+diff --git a/scripts/workloads/common.sh b/scripts/workloads/common.sh
+index 7dd360e..1ebec0e 100755
+--- a/scripts/workloads/common.sh
++++ b/scripts/workloads/common.sh
+@@ -4,7 +4,7 @@
+ #
+ # Common arguments of every driver:
+ #   --topology FILE        scripts/setup/topologies/<name>.toml
+-#   --backend neon|doltgres
++#   --backend neon|doltgres|pgcopy
+ #   --outdir DIR           results go to DIR/<backend>/<workload>/ (smoke: DIR/<backend>/smoke/<workload>/)
+ #   [--smoke]              counts /10 (at least 30), N = 1,4, 10 creates
+ #   [--ns LIST]            busy-branch counts (default: the topology's ns_data / ns_branch)
+@@ -41,8 +41,8 @@ parse_args() {
+             *)          REST+=("$1"); shift ;;
+         esac
+     done
+-    [[ -n $TOPO && -n $BACKEND_ARG && -n $OUTDIR ]] || die "--topology FILE --backend neon|doltgres --outdir DIR are required"
+-    [[ $BACKEND_ARG == neon || $BACKEND_ARG == doltgres ]] || die "--backend neon|doltgres"
++    [[ -n $TOPO && -n $BACKEND_ARG && -n $OUTDIR ]] || die "--topology FILE --backend neon|doltgres|pgcopy --outdir DIR are required"
++    [[ $BACKEND_ARG == neon || $BACKEND_ARG == doltgres || $BACKEND_ARG == pgcopy ]] || die "--backend neon|doltgres|pgcopy"
+     [[ -f $TOPO ]] || die "no topology file $TOPO"
+     TOPO="$(cd "$(dirname "$TOPO")" && pwd)/$(basename "$TOPO")"
+     $DRY || mkdir -p "$OUTDIR" || die "cannot create $OUTDIR"
+@@ -56,7 +56,7 @@ load_env() {
+     unset DBFORK_SERVER_HOST DBFORK_SERVER_SSH DBFORK_PREWARM_SQL DBFORK_REMOTE_CPU DBFORK_SERVER_PID DBFORK_SETUP
+     unset DOLT_HOST DOLT_PORT DOLT_USER DOLT_PASSWORD DOLT_DATA_DIR
+     local v
+-    for v in $(compgen -e | grep -E '^(NEON_LOCAL_|DBFORK_)'); do unset "$v"; done
++    for v in $(compgen -e | grep -E '^(NEON_LOCAL_|PGCOPY_|DBFORK_)'); do unset "$v"; done
+     local sh
+     sh=$(uv run python scripts/setup/topo.py shell "$TOPO" --backend "$BACKEND_ARG") || die "topology $TOPO is invalid"
+     eval "$sh"
+@@ -112,6 +112,13 @@ neon_prewarm_sql() {
+     echo "SET maintenance_io_concurrency = 128; SELECT pg_prewarm('stock','buffer','main',0,$((PREWARM_HEAP_BLOCKS - 1))); SELECT pg_prewarm('stock_pkey')"
+ }
+ 
++# pgcopy_opts STATEMENT_LOG(true|false): JSON for PGCOPY_INSTANCE_OPTS (every instance the run creates)
++pgcopy_opts() { echo "{\"statement_log\":$1}"; }
++
++# prewarm_backend: the backends whose branches get the Neon prewarm (pgcopy: the same pages into its 40 MB of
++# shared_buffers, experiment 13)
++prewarm_backend() { [[ $BACKEND == neon || $BACKEND == pgcopy ]]; }
++
+ # compute_opts STATEMENT_LOG(true|false) [PGDATA_ON_DISK(true|false)]: JSON for NEON_LOCAL_COMPUTE_OPTS: the
+ # pageserver shards (NEON_LOCAL_PS_OPTS, after a shard split), the LFC size, statement logging (on for low
+ # contention and cold start: the compute log holds per-statement durations; off for the scaling runs) and, for the
+@@ -143,7 +150,7 @@ is_done() { [[ -f $PROGRESS ]] && grep -q "^.* DONE  $1 " "$PROGRESS"; }
+ 
+ shared_md5() {
+     local f files=(microbench/runner2.py dblib/db_api.py scripts/run_throughput_bench.sh)
+-    [[ $BACKEND == neon ]] && files+=(dblib/neon_local.py) || files+=(dblib/dolt.py)
++    case $BACKEND in neon) files+=(dblib/neon_local.py) ;; pgcopy) files+=(dblib/pgcopy.py) ;; *) files+=(dblib/dolt.py) ;; esac
+     files+=(scripts/workloads/common.sh scripts/workloads/"$WORKLOAD".sh scripts/workloads/"$WORKLOAD".py)
+     for f in "${files[@]}"; do
+         [[ -f $f ]] && md5sum "$f" | awk '{printf "%s:%s ", $2, substr($1,1,8)}'
+@@ -175,7 +182,11 @@ setup_ctl() {  # SUBCMD ARGS...: scripts/setup/<backend>.py TOPO SUBCMD ... if t
+ guards() {  # refuse to run unless the client host, the server, the environment and the disk are as intended
+     on_client_host || die "run this on the client node $CLIENT_NODE ($CLIENT_HOST), after scripts/setup/$BACKEND.py $TOPO deploy-client"
+     DBFORK_SERVER_PID=""
+-    if [[ $BACKEND == neon ]]; then
++    if [[ $BACKEND == pgcopy ]]; then
++        [[ -f $STATE_DIR/pgcopy_seed.json ]] || die "no $STATE_DIR/pgcopy_seed.json: scripts/setup/pgcopy.py $TOPO seed, deploy-client"
++        [[ -n ${PGCOPY_LOCAL_AGENT:-} ]] || die "PGCOPY_LOCAL_AGENT is empty in $ENV_FILE: this node is not a pgcopy host"
++        curl -sf "$PGCOPY_LOCAL_AGENT/time" > /dev/null || die "the local pgcopy agent $PGCOPY_LOCAL_AGENT does not answer: scripts/setup/pgcopy.py $TOPO start"
++    elif [[ $BACKEND == neon ]]; then
+         [[ -n ${NEON_LOCAL_TENANT_ID:-} ]] || die "no seed in $ENV_FILE: run scripts/setup/neon.py $TOPO seed and env-init"
+         if [[ $SERVER_SAME_HOST == 1 ]]; then
+             DBFORK_SERVER_PID=$(pid_from "$NEON_RUN_DIR/pageserver.pid")
+@@ -369,6 +380,7 @@ print_cmd() {  # what a dry run shows for one run
+     echo "---- DRY-RUN $name"
+     local e; for e in "${RUN_ENV[@]}"; do echo "  env $e"; done
+     [[ $BACKEND == neon ]] && echo "  env NEON_LOCAL_COMPUTE_OPTS=${NEON_LOCAL_COMPUTE_OPTS:-}"
++    [[ $BACKEND == pgcopy ]] && echo "  env PGCOPY_INSTANCE_OPTS=${PGCOPY_INSTANCE_OPTS:-}"
+     echo "  env DBFORK_SERVER_PID=${DBFORK_SERVER_PID:-} DBFORK_REMOTE_CPU=${DBFORK_REMOTE_CPU:-<from $ENV_FILE>}"
+     echo "  env file $ENV_FILE$( [[ -f $ENV_FILE ]] || echo ' (missing)')"
+     if [[ $SERVER_SAME_HOST == 1 ]]; then agent_cmd "$name"; echo "  cpu agent: ${AGENT_ARGV[*]} &"; fi
+diff --git a/scripts/workloads/low_contention.sh b/scripts/workloads/low_contention.sh
+index 81e3c3b..27012fe 100755
+--- a/scripts/workloads/low_contention.sh
++++ b/scripts/workloads/low_contention.sh
+@@ -9,7 +9,7 @@
+ #            reads, 20% point updates)
+ # Neon: statement logging on (the compute log holds per-statement durations).
+ #
+-#   scripts/workloads/low_contention.sh --topology T --backend neon|doltgres --outdir DIR \
++#   scripts/workloads/low_contention.sh --topology T --backend neon|doltgres|pgcopy --outdir DIR \
+ #       [--parts data,branch] [--ops READ,...] [--smoke] [--dry-run]
+ {
+ source "$(dirname "$0")/common.sh"
+@@ -27,10 +27,9 @@ wl_init low_contention
+ (( RUN_TIMEOUT < 7200 )) && RUN_TIMEOUT=7200   # experiments 5 and 11: 40,000 reads over a WAN round trip
+ $SMOKE && CREATES=10
+ RUN_ENV=()
+-if [[ $BACKEND == neon ]]; then
+-    export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts true false)"
+-    RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
+-fi
++[[ $BACKEND == neon ]] && export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts true false)"
++[[ $BACKEND == pgcopy ]] && export PGCOPY_INSTANCE_OPTS="$(pgcopy_opts true)"
++prewarm_backend && RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
+ 
+ ops() {  # experiment 4's counts
+     local k
+@@ -38,7 +37,7 @@ ops() {  # experiment 4's counts
+     smoke_k "$k"
+ }
+ 
+-wl_start "parts=$PARTS ops='$DATA_OPS' creates=$CREATES connect_every=$CONNECT_EVERY prewarm_heap_blocks=$PREWARM_HEAP_BLOCKS opts=${NEON_LOCAL_COMPUTE_OPTS:-}"
++wl_start "parts=$PARTS ops='$DATA_OPS' creates=$CREATES connect_every=$CONNECT_EVERY prewarm_heap_blocks=$PREWARM_HEAP_BLOCKS opts=${NEON_LOCAL_COMPUTE_OPTS:-${PGCOPY_INSTANCE_OPTS:-}}"
+ one_data() {
+     local op=$1 dir="$OUTROOT/data_ops/$1"
+     $DRY || mkdir -p "$dir"
+diff --git a/scripts/workloads/multi_client/multi_scaling.py b/scripts/workloads/multi_client/multi_scaling.py
+index 1ec6e43..0f12d6f 100755
+--- a/scripts/workloads/multi_client/multi_scaling.py
++++ b/scripts/workloads/multi_client/multi_scaling.py
+@@ -26,6 +26,22 @@ runner); remote CPU from the first node's sampler (its window spans GO to its la
+ nodes (each node's runner processes, cores over its own window x its window / merged window).
+ Pass checks: every node exited 0, failed_ops = 0, each node ran its intended processes, remote node CPU present for
+ every server-set agent. A point that does not pass is retried once at the end (as scaling_data.sh).
++
++--backend pgcopy (experiment 13: clients co-located with their branch instances on every host node): the same, with
++<state_dir>/pgcopy.env (each node's own view, written by pgcopy.py deploy-client), the purge through pgcopy_ctl.py,
++and ssh to the other nodes on their LAN addresses with the cluster-internal key (~/.ssh/config on every node). Two
++more modes:
++
++    multi_scaling.py run-branch  --backend pgcopy --topology T --clients n1,...,n15 --outdir DIR [--ns 1,4,...]
++        scaling_branch over the nodes: node 1 runs scaling_branch.sh's creator runner (CREATES creates, every
++        CONNECT_EVERY-th connected) with its n_1 busy branches (background MIXED); every other node i runs the same
++        runner on its n_i busy branches with one create that only waits (fast_client hold patch) until node 1 is
++        done: N busy branches in all, one creator. Merged summary = node 1's summary (create latencies) plus a
++        "multi_client" block with every node's background ops in the window, at
++        DIR/pgcopy/scaling_branch/branch_create/mixed/<run_id>_BRANCH_CREATE_threads1_summary.json.
++    multi_scaling.py run-ceiling --backend pgcopy --topology T --clients ... --outdir DIR [--ns 128,...] [--kinds ...]
++        ceiling_check.py on every node with its share of each N, every measurement started together (coordinator
++        GO per kind and N); per-node CSVs summed per (kind, N) into DIR/pgcopy/scaling_data/ceiling_check.csv.
+ """
+ from __future__ import annotations
+ 
+@@ -63,7 +79,8 @@ def log_line(progress: Path, msg: str) -> None:
+ def md5s() -> str:
+     files = [f"{FC_DIR}/patches.py", f"{FC_DIR}/sitecustomize.py", NODE_RUN, "scripts/workloads/multi_client/multi_scaling.py",
+              "microbench/runner2.py", "dblib/db_api.py", "scripts/run_throughput_bench.sh", "dblib/neon_local.py",
+-             "scripts/workloads/common.sh", "scripts/workloads/scaling_data.sh"]
++             "dblib/pgcopy.py", "scripts/workloads/common.sh", "scripts/workloads/scaling_data.sh",
++             "scripts/workloads/scaling_branch.sh", "scripts/workloads/ceiling_check.py"]
+     return " ".join(f"{f}:{hashlib.md5((REPO / f).read_bytes()).hexdigest()[:8]}" for f in files if (REPO / f).exists())
+ 
+ 
+@@ -110,6 +127,15 @@ class Coordinator:
+         with self.lock:
+             self.keys[key] = {"expected": n, "conns": [], "state": "wait", "go": None}
+ 
++    def release(self, key: str) -> None:
++        """GO for a key now, whoever has arrived (the hold of background-only nodes)."""
++        with self.lock:
++            k = self.keys.get(key)
++            if k and k["state"] == "wait":
++                k["state"], k["go"] = "go", time.time()
++                for e in k["conns"]:
++                    e.set()
++
+     def abort(self, key: str, reason: str) -> None:
+         with self.lock:
+             k = self.keys.get(key)
+@@ -130,11 +156,59 @@ def shares(n: int, k: int) -> list[int]:
+     return [n // k + (1 if i < n % k else 0) for i in range(k)]
+ 
+ 
+-def ssh_base(topo: Topo) -> list[str]:
++def ssh_base(topo: Topo, backend: str = "neon") -> list[str]:
++    if backend == "pgcopy":   # LAN addresses, the cluster-internal key from ~/.ssh/config (pgcopy.py install)
++        return ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"]
+     key = os.path.expanduser(topo.ssh_key) if getattr(topo, "ssh_key", None) else os.path.expanduser("~/.ssh/dassl_rsa")
+     return ["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"]
+ 
+ 
++class Ctx:
++    """What every mode needs from the topology for one backend."""
++
++    def __init__(self, a):
++        self.backend = getattr(a, "backend", "neon")
++        self.topo = Topo(a.topology)
++        self.sec = self.topo.section(self.backend)
++        if not self.sec:
++            raise SystemExit(f"topology has no [{self.backend}] section")
++        self.clients = a.clients.split(",") if a.clients else list(self.sec.get("hosts") or [])
++        self.w = self.topo.wl(self.backend)
++        self.max_procs = self.w["max_procs"] or 20
++        self.state = self.topo.state_dir
++        self.env_file = f"{self.state}/{self.backend}.env"
++        self.runner_backend = {"neon": "neon_local", "pgcopy": "pgcopy"}[self.backend]
++        self.ssh = ssh_base(self.topo, self.backend)
++
++    def target(self, name: str) -> str:
++        nd = self.topo.node(name)
++        return nd.lan if self.backend == "pgcopy" else f"{self.topo.ssh_user}@{nd.host}"
++
++    def rid(self, threads: int, branches: int) -> str:
++        return f"{self.runner_backend}_chw{self.w['W']}_tp_t{threads}_b{branches}"
++
++    def remote_spec(self) -> str:
++        for line in Path(self.env_file).read_text().splitlines():
++            if line.startswith("DBFORK_REMOTE_CPU="):
++                return line.split("=", 1)[1].strip("'\"")
++        return ""
++
++    def purge(self, logfile: Path) -> None:
++        ctl = ["scripts/setup/neon_ctl.py", "--env", self.env_file, "purge"] if self.backend == "neon" else \
++            ["scripts/setup/pgcopy_ctl.py", "--env", self.env_file, "purge"]
++        with logfile.open("a") as f:
++            subprocess.run(["uv", "run", "python", *ctl], cwd=REPO, stdout=f, stderr=subprocess.STDOUT, check=False)
++
++    def launch(self, node: str, cmd: str, logf):
++        argv = ["bash", "-c", cmd] if node == self.clients[0] else self.ssh + [self.target(node), cmd]
++        return subprocess.Popen(argv, stdout=logf, stderr=subprocess.STDOUT)
++
++    def fetch(self, node: str, src_dir: Path) -> None:
++        src_dir.mkdir(parents=True, exist_ok=True)
++        subprocess.run(["rsync", "-a", "-e", " ".join(self.ssh), f"{self.target(node)}:{src_dir}/", f"{src_dir}/"],
++                       check=False)
++
++
+ def merge(op: str, n: int, nodes: list[dict], go: float, outroot: Path) -> dict:
+     import numpy as np
+     import pyarrow.parquet as pq
+@@ -210,39 +284,35 @@ def done_line(m: dict) -> str:
+ 
+ 
+ # ---------------------------------------------------------------- run
+-def run(a) -> int:
+-    topo = Topo(a.topology)
+-    n = topo.neon
+-    clients = a.clients.split(",")
+-    if clients[0] != n["client"]:
+-        raise SystemExit(f"the first client must be the topology's client ({n['client']}): this driver runs there")
++def first_client(cx: Ctx):
++    topo, clients = cx.topo, cx.clients
++    if clients[0] != cx.sec["client"]:
++        raise SystemExit(f"the first client must be the topology's client ({cx.sec['client']}): this driver runs there")
+     me = topo.node(clients[0])
+     here = {socket.gethostname(), socket.getfqdn()}
+-    if me.host not in here and not any(h.startswith(me.name + ".") for h in here):
++    if not me.is_here() and me.host not in here and not any(h.startswith(me.name + ".") for h in here):
+         print(f"warning: this host ({socket.gethostname()}) does not look like {me.name} ({me.host})", file=sys.stderr)
++    return me
++
++
++def run(a) -> int:
++    cx = Ctx(a)
++    topo, clients, max_procs, env_file = cx.topo, cx.clients, cx.max_procs, cx.env_file
++    me = first_client(cx)
+     sync_addr = f"{me.lan}:{a.port}"
+-    max_procs = topo.wl("neon")["max_procs"] or 20
+-    state = topo.state_dir
+-    env_file = f"{state}/neon.env"
+-    remote_spec = ""
+-    for line in Path(env_file).read_text().splitlines():
+-        if line.startswith("DBFORK_REMOTE_CPU="):
+-            remote_spec = line.split("=", 1)[1].strip("'\"")
+-    outroot = Path(a.outdir).resolve() / "neon" / "scaling_data"
++    remote_spec = cx.remote_spec()
++    outroot = Path(a.outdir).resolve() / cx.backend / "scaling_data"
+     (outroot / "logs").mkdir(parents=True, exist_ok=True)
+     progress = outroot / "progress.log"
+-    ns = [int(x) for x in (a.ns or ",".join(map(str, topo.wl("neon")["ns_data"]))).split(",")]
++    ns = [int(x) for x in (a.ns or ",".join(map(str, cx.w["ns_data"]))).split(",")]
+     ops = a.ops.split(",")
+     coord = Coordinator(a.port)
+-    ssh = ssh_base(topo)
+-    log_line(progress, f"=== multi-client scaling_data (neon, topology {topo.name}): clients={clients} ns={ns} "
++    log_line(progress, f"=== multi-client scaling_data ({cx.backend}, topology {topo.name}): clients={clients} ns={ns} "
+                        f"ops={ops} max_procs/node={max_procs} sync={sync_addr} host={socket.gethostname()}")
+     log_line(progress, f"code md5: {md5s()}")
+ 
+     def purge(tag: str) -> None:
+-        with (outroot / "logs" / f"purge_{tag}.log").open("a") as f:
+-            subprocess.run(["uv", "run", "python", "scripts/setup/neon_ctl.py", "--env", env_file, "purge"],
+-                           cwd=REPO, stdout=f, stderr=subprocess.STDOUT, check=False)
++        cx.purge(outroot / "logs" / f"purge_{tag}.log")
+ 
+     def done(name: str) -> bool:
+         return progress.exists() and any(f" DONE  {name} " in l for l in progress.read_text().splitlines())
+@@ -258,16 +328,14 @@ def run(a) -> int:
+         t0 = time.time()
+         procs = []
+         for x in nodes:
+-            nd = topo.node(x["node"])
+             cmd = (f"cd {REMOTE_REPO if x['node'] != clients[0] else REPO} && "
+                    f"env BENCH_FAST_CLIENT=1 PYTHONPATH=$PWD/{FC_DIR} BENCH_SYNC_ADDR={sync_addr} "
+                    f"BENCH_SYNC_KEY={key} {NODE_RUN} --topology {shlex.quote(a.topology_remote or a.topology)} "
+-                   f"--backend neon --outdir {shlex.quote(str(Path(a.outdir).resolve()))} --op {op} "
++                   f"--backend {cx.backend} --outdir {shlex.quote(str(Path(a.outdir).resolve()))} --op {op} "
+                    f"--n-total {total} --n-node {x['n']} --procs {x['procs']} --node {x['node']} "
+                    f"--setup-parallelism {max(1, a.setup_parallelism // len(nodes))}")
+             logf = (outroot / "logs" / f"{name}.{x['node']}.log").open("w")
+-            argv = ["bash", "-c", cmd] if x["node"] == clients[0] else ssh + [f"{topo.ssh_user}@{nd.host}", cmd]
+-            procs.append((x, subprocess.Popen(argv, stdout=logf, stderr=subprocess.STDOUT), logf))
++            procs.append((x, cx.launch(x["node"], cmd, logf), logf))
+         rcs = {}
+         while len(rcs) < len(procs):
+             for x, p, _ in procs:
+@@ -284,11 +352,7 @@ def run(a) -> int:
+         state_, go, arrived = coord.status(key)
+         # results of the other nodes back to this node (same paths)
+         for x in nodes[1:]:
+-            nd = topo.node(x["node"])
+-            src = f"{topo.ssh_user}@{nd.host}:{outroot}/data_ops/{op}/{x['node']}/"
+-            dst = outroot / "data_ops" / op / x["node"]
+-            dst.mkdir(parents=True, exist_ok=True)
+-            subprocess.run(["rsync", "-a", "-e", " ".join(ssh), src, f"{dst}/"], check=False)
++            cx.fetch(x["node"], outroot / "data_ops" / op / x["node"])
+         bad = {k: v for k, v in rcs.items() if v != 0}
+         secs = int(time.time() - t0)
+         if bad or state_ != "go":
+@@ -296,7 +360,7 @@ def run(a) -> int:
+                                f"see logs/{name}.<node>.log) t={time.time():.3f}")
+             purge("after_failure")
+             return
+-        rid = lambda k: f"neon_local_chw{topo.wl('neon')['W']}_tp_t{k}_b{k}"  # noqa: E731
++        rid = lambda k: cx.rid(k, k)  # noqa: E731
+         for x in nodes:
+             d = outroot / "data_ops" / op / x["node"]
+             x["summary"] = str(d / f"{rid(x['n'])}_{op}_threads{x['n']}_summary.json")
+@@ -329,26 +393,263 @@ def run(a) -> int:
+     return 0
+ 
+ 
++# ---------------------------------------------------------------- run-branch
++def run_branch(a) -> int:
++    """scaling_branch with the N busy branches spread over the nodes and one creator (node 1)."""
++    cx = Ctx(a)
++    topo, clients, max_procs = cx.topo, cx.clients, cx.max_procs
++    me = first_client(cx)
++    sync_addr = f"{me.lan}:{a.port}"
++    remote_spec = cx.remote_spec()
++    bg = (a.background or cx.w["background"]).upper()
++    outroot = Path(a.outdir).resolve() / cx.backend / "scaling_branch"
++    d = outroot / "branch_create" / bg.lower()
++    (outroot / "logs").mkdir(parents=True, exist_ok=True)
++    d.mkdir(parents=True, exist_ok=True)
++    progress = outroot / "progress.log"
++    ns = [int(x) for x in (a.ns or ",".join(map(str, cx.w["ns_branch"]))).split(",")]
++    creates = a.creates or cx.w["creates"]
++    coord = Coordinator(a.port)
++    log_line(progress, f"=== multi-client scaling_branch ({cx.backend}, topology {topo.name}): clients={clients} ns={ns} "
++                       f"background={bg} creates={creates} max_procs/node={max_procs} sync={sync_addr} "
++                       f"host={socket.gethostname()}")
++    log_line(progress, f"code md5: {md5s()}")
++
++    def done(name: str) -> bool:
++        return progress.exists() and any(f" DONE  {name} " in l for l in progress.read_text().splitlines())
++
++    def one(total: int, attempt: int) -> None:
++        name = f"create_{bg.lower()}_n{total}"
++        sh = shares(total, len(clients))
++        nodes = [{"node": c, "n": k, "procs": min(max_procs, k + 1)} for c, k in zip(clients, sh)]
++        key = f"{name}.{attempt}.{int(time.time())}"
++        hold = key + ".hold"
++        # one GO connection per node: only the process holding the timed creator thread passes the start barrier
++        # (background clients never do)
++        coord.expect(key, len(nodes))
++        coord.expect(hold, 10 ** 9)            # released when node 1's creator is done
++        cx.purge(outroot / "logs" / "purge_before.log")
++        log_line(progress, f"START {name} t={time.time():.3f} shares={[(x['node'], x['n'], x['procs']) for x in nodes]}")
++        t0 = time.time()
++        procs = []
++        for i, x in enumerate(nodes):
++            env = f"BENCH_FAST_CLIENT=1 PYTHONPATH=$PWD/{FC_DIR} BENCH_SYNC_ADDR={sync_addr} BENCH_SYNC_KEY={key}"
++            if i > 0:
++                env += f" BENCH_HOLD_KEY={hold}"
++            cmd = (f"cd {REMOTE_REPO if i else REPO} && env {env} {NODE_RUN} --mode branch "
++                   f"--topology {shlex.quote(a.topology_remote or a.topology)} --backend {cx.backend} "
++                   f"--outdir {shlex.quote(str(Path(a.outdir).resolve()))} --op {bg} --n-total {total} "
++                   f"--n-node {x['n']} --procs {x['procs']} --node {x['node']} --creates {creates} "
++                   f"--setup-parallelism {max(1, a.setup_parallelism // len(nodes))}")
++            logf = (outroot / "logs" / f"{name}.{x['node']}.log").open("w")
++            procs.append((x, cx.launch(x["node"], cmd, logf), logf))
++        rcs: dict = {}
++        while len(rcs) < len(procs):
++            for x, p, _ in procs:
++                if x["node"] in rcs:
++                    continue
++                r = p.poll()
++                if r is not None:
++                    rcs[x["node"]] = r
++                    if r != 0:
++                        coord.abort(key, f"{x['node']} exited {r} before the start")
++                    if x["node"] == clients[0]:
++                        coord.release(hold)     # the creator is done: the background-only nodes stop
++            time.sleep(1)
++        for _, _, f in procs:
++            f.close()
++        state_, go, arrived = coord.status(key)
++        for x in nodes[1:]:
++            cx.fetch(x["node"], d / x["node"])
++        bad = {k: v for k, v in rcs.items() if v != 0}
++        secs = int(time.time() - t0)
++        if bad or state_ != "go":
++            log_line(progress, f"FAILED {name} ({secs}s, exits {rcs}, start {state_} {arrived} arrived; "
++                               f"see logs/{name}.<node>.log) t={time.time():.3f}")
++            cx.purge(outroot / "logs" / "purge_after_failure.log")
++            return
++        try:
++            sums = []
++            for x in nodes:
++                f = d / x["node"] / f"{cx.rid(1, x['n'])}_BRANCH_CREATE_threads1_summary.json"
++                sums.append(json.loads(f.read_text()))
++            m = dict(sums[0])
++            m["run_id"] = cx.rid(1, total)
++            m["num_branches"] = total
++            m["num_processes"] = sum(s_["num_processes"] for s_ in sums)
++            k = int(os.environ.get("BENCH_BG_SAMPLE") or 20)   # fast_client samples background rows 1/k
++            bgs = [dict(s_.get("background") or {}) for s_ in sums]
++            for b_ in bgs:
++                for key in ("ops_in_window", "throughput"):
++                    if b_.get(key) is not None:
++                        b_[f"{key}_sampled"] = b_[key]
++                        b_[key] = b_[key] * k
++                b_["row_sample"] = k
++            m["multi_client"] = {
++                "go_time": go, "creator": clients[0], "remote_cpu_from": clients[0],
++                "nodes": [{"node": x["node"], "branches": x["n"], "procs": x["procs"],
++                           "num_processes": s_["num_processes"], "elapsed_time": s_.get("elapsed_time"),
++                           "background": b_, "client_cpu_cores": s_.get("client_cpu_cores"),
++                           "summary": os.path.relpath(d / x["node"], outroot)} for x, s_, b_ in zip(nodes, sums, bgs)],
++                "background_ops_in_window": sum((b_.get("ops_in_window") or 0) for b_ in bgs),
++                "background_failed": sum((b_.get("failed") or 0) for b_ in bgs),
++            }
++        except Exception as e:  # noqa: BLE001
++            log_line(progress, f"CHECK-FAIL {name} ({secs}s) merge failed: {e!r} t={time.time():.3f}")
++            return
++        (d / f"{cx.rid(1, total)}_BRANCH_CREATE_threads1_summary.json").write_text(json.dumps(m, indent=2))
++        problems = []
++        if sums[0].get("failed_ops"):
++            problems.append(f"failed_ops={sums[0]['failed_ops']}")
++        if m["multi_client"]["background_failed"]:
++            problems.append(f"background failed={m['multi_client']['background_failed']}")
++        for x in m["multi_client"]["nodes"]:
++            if x["num_processes"] != x["procs"]:
++                problems.append(f"{x['node']}: num_processes {x['num_processes']} != {x['procs']}")
++        labels = dict(y.split("=", 1) for y in filter(None, (z.strip() for z in remote_spec.split(";"))))
++        for label, url in labels.items():
++            if "set=server" in url and ((m.get("remote_cpu") or {}).get(label) or {}).get("node_cores") is None:
++                problems.append(f"no remote_cpu.{label}.node_cores")
++        lat = (m.get("latency") or {}).get("ops") or {}
++        r2 = lambda x: None if x is None else round(x, 2)  # noqa: E731
++        per = " ".join(f"{x['node']}:{x['branches']}b/{(x['background'] or {}).get('ops_in_window')}bg"
++                       for x in m["multi_client"]["nodes"])
++        word = "DONE " if not problems else "CHECK-FAIL"
++        log_line(progress, f"{word} {name} ({secs}s) p50={lat.get('p50', 0) * 1e3:.1f}ms mean={lat.get('mean', 0) * 1e3:.1f}ms "
++                           f"window={m.get('elapsed_time', 0):.1f}s procs={m['num_processes']} "
++                           f"bg_ops={m['multi_client']['background_ops_in_window']} client_cpu={r2(m.get('client_cpu_cores'))} "
++                           f"clients=[{per}] {'PROBLEMS: ' + ', '.join(problems) if problems else 'ok'} t={time.time():.3f}")
++
++    for total in ns:
++        if done(f"create_{bg.lower()}_n{total}"):
++            log_line(progress, f"SKIP  create_{bg.lower()}_n{total} (done before)")
++            continue
++        one(total, 1)
++    for total in ns:
++        if not done(f"create_{bg.lower()}_n{total}"):
++            log_line(progress, f"RETRY create_{bg.lower()}_n{total}")
++            one(total, 2)
++    cx.purge(outroot / "logs" / "purge_end.log")
++    log_line(progress, "=== multi-client scaling_branch done")
++    return 0
++
++
++# ---------------------------------------------------------------- run-ceiling
++def run_ceiling(a) -> int:
++    """ceiling_check.py on every node with its share of each N, each measurement started together."""
++    import csv
++    cx = Ctx(a)
++    topo, clients = cx.topo, cx.clients
++    me = first_client(cx)
++    sync_addr = f"{me.lan}:{a.port}"
++    outroot = Path(a.outdir).resolve() / cx.backend / "scaling_data"
++    cdir = outroot / "ceiling"
++    (outroot / "logs").mkdir(parents=True, exist_ok=True)
++    cdir.mkdir(parents=True, exist_ok=True)
++    progress = outroot / "progress.log"
++    ns = [int(x) for x in a.ns.split(",")]
++    kinds = a.kinds.split(",")
++    if progress.exists() and any(" DONE  ceiling " in l for l in progress.read_text().splitlines()):
++        log_line(progress, "SKIP  ceiling (done before)")
++        return 0
++    coord = Coordinator(a.port)
++    prefix = f"ceiling.{int(time.time())}"
++    used = [c for i, c in enumerate(clients) if shares(max(ns), len(clients))[i:i + 1]]
++    per_node = {c: [shares(n, len(clients))[i] if i < min(n, len(clients)) else 0 for n in ns]
++                for i, c in enumerate(used)}
++    for kind in kinds:
++        for j, n in enumerate(ns):
++            coord.expect(f"{prefix}.{kind}.{n}", sum(1 for c in used if per_node[c][j] > 0))
++    cx.purge(outroot / "logs" / "purge_ceiling_before.log")
++    log_line(progress, f"START ceiling t={time.time():.3f} ns={ns} kinds={kinds} nodes={len(used)} "
++                       f"shares_of_max={[per_node[c][-1] for c in used]}")
++    t0 = time.time()
++    procs = []
++    for i, c in enumerate(used):
++        out = cdir / f"{c}.csv"
++        cmd = (f"cd {REMOTE_REPO if i else REPO} && export PATH=$HOME/.local/bin:$PATH && "
++               f"uv run python scripts/workloads/ceiling_check.py --topology {shlex.quote(a.topology_remote or a.topology)} "
++               f"--backend {cx.backend} --ns {a.ns} --ns-local {','.join(map(str, per_node[c]))} --kinds {a.kinds} "
++               f"--seconds {a.seconds} --procs {cx.max_procs} --out {out} --sync-addr {sync_addr} "
++               f"--sync-prefix {prefix} --no-purge")
++        logf = (outroot / "logs" / f"ceiling.{c}.log").open("w")
++        procs.append((c, cx.launch(c, cmd, logf), logf))
++    rcs = {}
++    while len(rcs) < len(procs):
++        for c, p, _ in procs:
++            if c not in rcs and p.poll() is not None:
++                rcs[c] = p.returncode
++                if p.returncode != 0:
++                    for kind in kinds:
++                        for n in ns:
++                            coord.abort(f"{prefix}.{kind}.{n}", f"{c} exited {p.returncode}")
++        time.sleep(1)
++    for _, _, f in procs:
++        f.close()
++    for c in used[1:]:
++        cx.fetch(c, cdir)
++    cx.purge(outroot / "logs" / "purge_ceiling_after.log")
++    secs = int(time.time() - t0)
++    bad = {k: v for k, v in rcs.items() if v != 0}
++    if bad:
++        log_line(progress, f"FAILED ceiling ({secs}s, exits {rcs}; see logs/ceiling.<node>.log) t={time.time():.3f}")
++        return 1
++    rows = {}
++    for c in used:
++        f = cdir / f"{c}.csv"
++        if not f.exists():
++            continue
++        for r in csv.DictReader(f.open()):
++            rows.setdefault((r["kind"], int(r["busy_branches_total"])), []).append((c, r))
++    merged = []
++    for (kind, n), lst in sorted(rows.items(), key=lambda x: (kinds.index(x[0][0]), x[0][1])):
++        ops = sum(float(r["ops_per_s"]) for _, r in lst)
++        wsum = lambda key: (sum(float(r[key]) * float(r["ops_per_s"]) for _, r in lst if r.get(key))  # noqa: E731
++                            / ops if ops else None)
++        row = {"backend": cx.backend, "kind": kind, "busy_branches": n, "nodes": len(lst),
++               "client_processes": sum(int(r["client_processes"]) for _, r in lst), "ops_per_s": round(ops),
++               "errors": sum(int(r["errors"]) for _, r in lst),
++               "p50_ms_opsweighted": round(wsum("p50_ms"), 2) if ops else None,
++               "p95_ms_opsweighted": round(wsum("p95_ms"), 2) if ops else None,
++               "client_cpu_cores": round(sum(float(r["client_cpu_cores"]) for _, r in lst), 1)}
++        for key in ("server_node_cores", "server_proc_cores", "computes_proc_cores", "copy_proc_cores"):
++            vals = [float(r[key]) for _, r in lst if r.get(key) not in (None, "")]
++            row[f"sum_{key}"] = round(sum(vals), 1) if vals else None
++        seed = [float(r["seed_node_cores"]) for _, r in lst if r.get("seed_node_cores") not in (None, "")]
++        row["seed_node_cores"] = round(max(seed), 1) if seed else None
++        row["per_node_ops_per_s"] = " ".join(f"{c}:{r['ops_per_s']}" for c, r in lst)
++        merged.append(row)
++    out = outroot / "ceiling_check.csv"
++    if merged:
++        keys = list(dict.fromkeys(k for r in merged for k in r))
++        with out.open("w", newline="") as f:
++            wr = csv.DictWriter(f, fieldnames=keys)
++            wr.writeheader()
++            wr.writerows(merged)
++    summary = " ".join(f"{r['kind']}@{r['busy_branches']}={r['ops_per_s']}/s" for r in merged)
++    word = "DONE " if merged and len(merged) == len(kinds) * len(ns) else "CHECK-FAIL"
++    log_line(progress, f"{word} ceiling ({secs}s) {summary} rows={len(merged)} t={time.time():.3f}")
++    return 0
++
++
+ # ---------------------------------------------------------------- remerge
+ def remerge(a) -> int:
+     """Rebuild the merged summaries of finished points from the per-node results (e.g. after a merge fix); the GO
+     time is taken from each point's progress line when present."""
+-    topo = Topo(a.topology)
+-    clients = a.clients.split(",")
+-    max_procs = topo.wl("neon")["max_procs"] or 20
+-    outroot = Path(a.outdir).resolve() / "neon" / "scaling_data"
+-    W = topo.wl("neon")["W"]
++    cx = Ctx(a)
++    clients, max_procs = cx.clients, cx.max_procs
++    outroot = Path(a.outdir).resolve() / cx.backend / "scaling_data"
+     for total in [int(x) for x in a.ns.split(",")]:
+         for op in a.ops.split(","):
+             nodes = [{"node": c, "n": k, "procs": min(max_procs, k)} for c, k in zip(clients, shares(total, len(clients)))]
+             for x in nodes:
+                 d = outroot / "data_ops" / op / x["node"]
+-                x["summary"] = str(d / f"neon_local_chw{W}_tp_t{x['n']}_b{x['n']}_{op}_threads{x['n']}_summary.json")
+-                x["parquet"] = str(d / f"neon_local_chw{W}_tp_t{x['n']}_b{x['n']}.parquet")
++                x["summary"] = str(d / f"{cx.rid(x['n'], x['n'])}_{op}_threads{x['n']}_summary.json")
++                x["parquet"] = str(d / f"{cx.rid(x['n'], x['n'])}.parquet")
+             if not all(Path(x["summary"]).exists() for x in nodes):
+                 print(f"skip {op} n={total}: per-node summaries missing")
+                 continue
+-            out = outroot / "data_ops" / op / f"neon_local_chw{W}_tp_t{total}_b{total}_{op}_threads{total}_summary.json"
++            out = outroot / "data_ops" / op / f"{cx.rid(total, total)}_{op}_threads{total}_summary.json"
+             go = (json.loads(out.read_text()).get("multi_client") or {}).get("go_time") if out.exists() else None
+             m = merge(op, total, nodes, go, outroot)
+             out.write_text(json.dumps(m, indent=2))
+@@ -358,6 +659,8 @@ def remerge(a) -> int:
+ 
+ # ---------------------------------------------------------------- deploy
+ def deploy(a) -> int:
++    if getattr(a, "backend", "neon") == "pgcopy":
++        raise SystemExit("pgcopy: scripts/setup/pgcopy.py TOPO deploy-client deploys every host")
+     from neon import Neon  # scripts/setup/neon.py
+     topo = Topo(a.topology)
+     nn = Neon(topo, False)
+@@ -379,22 +682,36 @@ def deploy(a) -> int:
+ def main() -> int:
+     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+     sub = ap.add_subparsers(dest="cmd", required=True)
+-    for name in ("deploy", "run", "remerge"):
++    for name in ("deploy", "run", "remerge", "run-branch", "run-ceiling"):
+         p = sub.add_parser(name)
+         p.add_argument("--topology", required=True)
+-        p.add_argument("--clients", required=True, help="client nodes, the topology's client first: b0,b1,...")
+-        if name in ("run", "remerge"):
++        p.add_argument("--backend", choices=["neon", "pgcopy"], default="neon")
++        p.add_argument("--clients", default="",
++                       help="client nodes, the topology's client first: b0,b1,... (pgcopy default: every host)")
++        if name != "deploy":
+             p.add_argument("--outdir", required=True)
+             p.add_argument("--ns", default="")
++        if name in ("run", "remerge"):
+             p.add_argument("--ops", default="READ,RANGE_READ,INSERT,UPDATE")
+-        if name == "run":
++        if name == "run-branch":
++            p.add_argument("--background", default="")
++            p.add_argument("--creates", type=int, default=0)
++        if name == "run-ceiling":
++            p.add_argument("--kinds", default="point,range,insert,update")
++            p.add_argument("--seconds", type=float, default=30)
++        if name in ("run", "run-branch", "run-ceiling"):
+             p.add_argument("--port", type=int, default=DEFAULT_PORT)
+             p.add_argument("--setup-parallelism", type=int, default=64,
+                            help="total branch-setup parallelism, divided over the nodes of a point")
+             p.add_argument("--topology-remote", default="", help="topology path on the other nodes (default: same)")
+     a = ap.parse_args()
++    if a.backend == "neon" and not a.clients:
++        ap.error("--clients is required for neon")
++    if a.cmd == "run-ceiling" and not a.ns:
++        a.ns = "128,256,512,1024"
+     os.chdir(REPO)
+-    return {"deploy": deploy, "run": run, "remerge": remerge}[a.cmd](a)
++    return {"deploy": deploy, "run": run, "remerge": remerge, "run-branch": run_branch,
++            "run-ceiling": run_ceiling}[a.cmd](a)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/scripts/workloads/multi_client/node_run.sh b/scripts/workloads/multi_client/node_run.sh
+index 4f163dd..b70c306 100755
+--- a/scripts/workloads/multi_client/node_run.sh
++++ b/scripts/workloads/multi_client/node_run.sh
+@@ -6,15 +6,20 @@
+ # does is left to multi_scaling.py, which runs once per point for all nodes: the purge, the pass checks, the
+ # progress log; the client-node guard and the workload lock (single-client assumptions) are not taken.
+ #
+-#   node_run.sh --topology T --backend neon --outdir D --op OP --n-total N --n-node n --procs p --node NAME
+-#               [--setup-parallelism K]
+-# Output: D/neon/scaling_data/data_ops/OP/NAME/ (runner summary + parquet), log on stdout.
++#   node_run.sh --topology T --backend neon|pgcopy --outdir D --op OP --n-total N --n-node n --procs p --node NAME
++#               [--setup-parallelism K] [--mode data|branch [--creates C]]
++# Output: D/<backend>/scaling_data/data_ops/OP/NAME/ (runner summary + parquet), log on stdout.
++# --mode branch (experiment 13, scaling_branch over several nodes): the creator runner of scaling_branch.sh
++# (BRANCH_CREATE, --branch-list n, background MIXED on the n busy branches) into
++# D/<backend>/scaling_branch/branch_create/<op lower>/NAME/; with BENCH_HOLD_KEY set (a background-only node) the
++# runner gets --branch-create-ops 1 and fast_client's hold patch turns that create into a wait for the measuring
++# node's end (op = the background operation, e.g. MIXED).
+ # Cross-node start: BENCH_FAST_CLIENT=1, PYTHONPATH=<repo>/microbench/fast_client, BENCH_SYNC_ADDR, BENCH_SYNC_KEY
+ # (microbench/fast_client/patches.py); none of them is a DBFORK_ variable, so load_env keeps them.
+ source "$(dirname "${BASH_SOURCE[0]}")/../common.sh"
+ parse_args "$@"
+ set -- "${REST[@]}"
+-OP="" NT="" NN="" PROCS="" NODE="" SP=""
++OP="" NT="" NN="" PROCS="" NODE="" SP="" MODE=data CREATES_ARG=""
+ while [[ $# -gt 0 ]]; do
+     case "$1" in
+         --op) OP=$2; shift 2 ;;
+@@ -23,18 +28,27 @@ while [[ $# -gt 0 ]]; do
+         --procs) PROCS=$2; shift 2 ;;
+         --node) NODE=$2; shift 2 ;;
+         --setup-parallelism) SP=$2; shift 2 ;;
++        --mode) MODE=$2; shift 2 ;;
++        --creates) CREATES_ARG=$2; shift 2 ;;
+         *) die "unknown argument $1" ;;
+     esac
+ done
+ [[ -n $OP && -n $NT && -n $NN && -n $PROCS && -n $NODE ]] || die "--op --n-total --n-node --procs --node are required"
+-[[ $BACKEND_ARG == neon ]] || die "multi-client runs are implemented for neon only"
++[[ $BACKEND_ARG == neon || $BACKEND_ARG == pgcopy ]] || die "multi-client runs are implemented for neon and pgcopy"
++[[ $MODE == data || $MODE == branch ]] || die "--mode data|branch"
+ 
+ WORKLOAD=scaling_data
++[[ $MODE == branch ]] && WORKLOAD=scaling_branch
+ load_env
+ BACKEND=$BACKEND_ARG
+ client_bind
+-[[ -n ${NEON_LOCAL_TENANT_ID:-} ]] || die "no seed in $ENV_FILE (neon.py TOPO seed, deploy-client, multi_scaling.py deploy)"
+-export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts false true)"
++if [[ $BACKEND == neon ]]; then
++    [[ -n ${NEON_LOCAL_TENANT_ID:-} ]] || die "no seed in $ENV_FILE (neon.py TOPO seed, deploy-client, multi_scaling.py deploy)"
++    export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts false true)"
++else
++    [[ -n ${PGCOPY_LOCAL_AGENT:-} ]] || die "no PGCOPY_LOCAL_AGENT in $ENV_FILE (pgcopy.py TOPO deploy-client)"
++    export PGCOPY_INSTANCE_OPTS="$(pgcopy_opts false)"
++fi
+ export DBFORK_PREWARM_SQL="$(neon_prewarm_sql)"
+ COMMON=(--mode sync --warmup-fraction "$WARMUP_FRACTION" --table-name "$TABLE"
+         --updates-per-branch "$UPDATES_PER_BRANCH" --seed-db "$SEED_DB" --generated-scale "$W"
+@@ -54,15 +68,29 @@ ops_per_client() {  # OP N: scripts/workloads/scaling_data.sh's (experiment 5's
+ }
+ 
+ OUTROOT="$OUTDIR/$BACKEND/$WORKLOAD"
+-dir="$OUTROOT/data_ops/$OP/$NODE"
++if [[ $MODE == branch ]]; then
++    dir="$OUTROOT/branch_create/${OP,,}/$NODE"
++    rid="${RUNNER_BACKEND}_chw${W}_tp_t1_b${NN}"
++else
++    dir="$OUTROOT/data_ops/$OP/$NODE"
++    rid="${RUNNER_BACKEND}_chw${W}_tp_t${NN}_b${NN}"
++fi
+ mkdir -p "$dir"
+-rid="${RUNNER_BACKEND}_chw${W}_tp_t${NN}_b${NN}"
+ shopt -s nullglob
+ old=("$dir/$rid".* "$dir/${rid}"_*)
+ shopt -u nullglob
+ if (( ${#old[@]} )); then   # the runner appends to <run_id>.parquet: an earlier attempt must not mix in
+     mkdir -p "$dir/superseded_$(date +%s)" && mv "${old[@]}" "$dir/superseded_$(date +%s)/"
+ fi
++if [[ $MODE == branch ]]; then
++    creates=${CREATES_ARG:-$CREATES}
++    [[ -n ${BENCH_HOLD_KEY:-} ]] && creates=1
++    echo "node_run $NODE: branch mode, background=$OP n_total=$NT n_node=$NN procs=$PROCS creates=$creates hold=${BENCH_HOLD_KEY:-} host=$(hostname)"
++    exec env timeout -k 120 -s INT "$RUN_TIMEOUT" "${CLIENT_BIND[@]}" "$TP" "$RUNNER_BACKEND" --sweep-branches \
++        --threads 1 --branch-list "$NN" --processes "$PROCS" --operations BRANCH_CREATE \
++        --branch-create-ops "$creates" --branch-create-connect-every "$CONNECT_EVERY" --background-op "$OP" \
++        "${COMMON[@]}" --output-dir "$dir"
++fi
+ echo "node_run $NODE: op=$OP n_total=$NT n_node=$NN procs=$PROCS ops_per_client=$(ops_per_client "$OP" "$NT") host=$(hostname)"
+ exec env timeout -k 120 -s INT "$RUN_TIMEOUT" "${CLIENT_BIND[@]}" "$TP" "$RUNNER_BACKEND" --sweep-proportional \
+     --threads-per-branch 1 --branch-list "$NN" --processes "$PROCS" --operations "$OP" \
+diff --git a/scripts/workloads/run_all.sh b/scripts/workloads/run_all.sh
+index 2020d9c..139df34 100755
+--- a/scripts/workloads/run_all.sh
++++ b/scripts/workloads/run_all.sh
+@@ -7,9 +7,12 @@
+ #   scaling_branch   scaling_branch.sh (N = ns_branch, background = the topology's background)
+ #   cold_start       cold_start.py (cold_runs x cold_reads point reads on a new branch)
+ #
+-#   scripts/workloads/run_all.sh --topology T --backend neon|doltgres --outdir DIR \
++#   scripts/workloads/run_all.sh --topology T --backend neon|doltgres|pgcopy --outdir DIR \
+ #       [--steps low_contention,scaling_data,scaling_branch,cold_start] [--no-ceiling] [--background READ|MIXED] \
+-#       [--smoke] [--dry-run]
++#       [--multi [--single-ns 1,4,16,64,128]] [--smoke] [--dry-run]
++# --multi (pgcopy, experiment 13): scaling_data, its ceiling and scaling_branch run over every host node with
++# scripts/workloads/multi_client/multi_scaling.py (run, run-ceiling, run-branch); scaling_branch also runs as the
++# single-node series (scaling_branch.sh on the client node, --single-ns, results under DIR/single/).
+ # Long runs: start it detached on the client node, e.g.
+ #   setsid nohup scripts/workloads/run_all.sh ... > DIR/run_all.out 2>&1 < /dev/null &
+ # (CloudLab: as a transient systemd unit, systemd-run --user, so that an ssh logout does not end it.)
+@@ -19,12 +22,16 @@ parse_args "$@"
+ STEPS="low_contention,scaling_data,scaling_branch,cold_start"
+ CEIL=(--ceiling)
+ BG_ARGS=()
++MULTI=false
++SINGLE_NS="1,4,16,64,128"
+ set -- "${REST[@]}"
+ while [[ $# -gt 0 ]]; do
+     case "$1" in
+         --steps)      STEPS="$2"; shift 2 ;;
+         --no-ceiling) CEIL=(); shift ;;
+         --background) BG_ARGS=(--background "$2"); shift 2 ;;
++        --multi)      MULTI=true; shift ;;
++        --single-ns)  SINGLE_NS="$2"; shift 2 ;;
+         *) die "unknown option $1" ;;
+     esac
+ done
+@@ -65,13 +72,43 @@ step() {  # name cmd...
+     note "FAILED $name ($((SECONDS - t0))s, exit $rc, see driver_$name.out)"; return 1
+ }
+ 
+-note "=== run_all $BACKEND_ARG: steps=$STEPS smoke=$SMOKE dry=$DRY topology=$TOPO"
++MS=(uv run python "$WL_DIR/multi_client/multi_scaling.py")
++multi_data() {
++    local a=(--backend "$BACKEND_ARG" --topology "$TOPO" --outdir "$OUTDIR")
++    local ns=$NS_ARG; $SMOKE && ns=${ns:-1,4}
++    [[ -n $ns ]] && a+=(--ns "$ns")
++    [[ -n $OPS_ARG ]] && a+=(--ops "${OPS_ARG// /,}")
++    if $DRY; then echo "  \$ ${MS[*]} run ${a[*]}"; else "${MS[@]}" run "${a[@]}" || return 1; fi
++    [[ ${#CEIL[@]} -gt 0 ]] || return 0
++    local c=(--backend "$BACKEND_ARG" --topology "$TOPO" --outdir "$OUTDIR")
++    if $SMOKE; then c+=(--ns 4 --seconds 5); fi
++    [[ -n $OPS_ARG ]] && c+=(--kinds "$(for op in $OPS_ARG; do case $op in READ) echo point ;; RANGE_READ) echo range ;; INSERT) echo insert ;; UPDATE) echo update ;; esac; done | paste -sd,)")
++    if $DRY; then echo "  \$ ${MS[*]} run-ceiling ${c[*]}"; else "${MS[@]}" run-ceiling "${c[@]}"; fi
++}
++multi_branch() {
++    local a=(--backend "$BACKEND_ARG" --topology "$TOPO" --outdir "$OUTDIR")
++    local ns=$NS_ARG; $SMOKE && { ns=${ns:-1,4}; a+=(--creates 10); }
++    [[ -n $ns ]] && a+=(--ns "$ns")
++    [[ ${#BG_ARGS[@]} -gt 0 ]] && a+=("${BG_ARGS[@]}")
++    if $DRY; then echo "  \$ ${MS[*]} run-branch ${a[*]}"; else "${MS[@]}" run-branch "${a[@]}" || return 1; fi
++    local sns=$SINGLE_NS; $SMOKE && sns=1,4
++    local sp=(--topology "$TOPO" --backend "$BACKEND_ARG" --outdir "$OUTDIR/single" --ns "$sns" "${BG_ARGS[@]}")
++    $SMOKE && sp+=(--smoke)
++    $DRY && sp+=(--dry-run)
++    "$WL_DIR/scaling_branch.sh" "${sp[@]}"
++}
++
++note "=== run_all $BACKEND_ARG: steps=$STEPS smoke=$SMOKE dry=$DRY multi=$MULTI topology=$TOPO"
+ IFS=',' read -ra L <<< "$STEPS"
+ for s in "${L[@]}"; do
+     case "$s" in
+         low_contention) step "$s" "$WL_DIR/low_contention.sh" "${PASS[@]}" "${OPSP[@]}" || exit 1 ;;
+-        scaling_data)   step "$s" "$WL_DIR/scaling_data.sh" "${PASS[@]}" "${NSP[@]}" "${OPSP[@]}" "${CEIL[@]}" || exit 1 ;;
+-        scaling_branch) step "$s" "$WL_DIR/scaling_branch.sh" "${PASS[@]}" "${NSP[@]}" "${BG_ARGS[@]}" || exit 1 ;;
++        scaling_data)
++            if $MULTI; then step "$s" multi_data || exit 1
++            else step "$s" "$WL_DIR/scaling_data.sh" "${PASS[@]}" "${NSP[@]}" "${OPSP[@]}" "${CEIL[@]}" || exit 1; fi ;;
++        scaling_branch)
++            if $MULTI; then step "$s" multi_branch || exit 1
++            else step "$s" "$WL_DIR/scaling_branch.sh" "${PASS[@]}" "${NSP[@]}" "${BG_ARGS[@]}" || exit 1; fi ;;
+         cold_start)     step "$s" cold_start_sub || exit 1 ;;
+         *) note "unknown step $s"; exit 1 ;;
+     esac
+diff --git a/scripts/workloads/scaling_branch.sh b/scripts/workloads/scaling_branch.sh
+index 15a4dd9..14508df 100755
+--- a/scripts/workloads/scaling_branch.sh
++++ b/scripts/workloads/scaling_branch.sh
+@@ -6,7 +6,7 @@
+ # min(N + 1, MAX_PROCS) client processes. Neon: the default cache filled on every busy branch before its client
+ # starts, statement logging off.
+ #
+-#   scripts/workloads/scaling_branch.sh --topology T --backend neon|doltgres --outdir DIR \
++#   scripts/workloads/scaling_branch.sh --topology T --backend neon|doltgres|pgcopy --outdir DIR \
+ #       [--ns 1,4,...] [--background MIXED|READ] [--smoke] [--dry-run]
+ # Results: DIR/<backend>/scaling_branch/branch_create/<background, lower case>/
+ {
+@@ -30,8 +30,12 @@ RUN_ENV=()
+ if [[ $BACKEND == neon ]]; then
+     [[ ${NEON_LOCAL_PS_OPTS:-} == *pageservers* ]] && warn "the tenant is sharded (NEON_LOCAL_PS_OPTS); experiment 5 created branches on the unsharded tenant"
+     export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts false true)"
+-    RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
+ fi
++[[ $BACKEND == pgcopy ]] && export PGCOPY_INSTANCE_OPTS="$(pgcopy_opts false)"
++prewarm_backend && RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
++# pgcopy (experiment 13): the client side as in its multi-node series (microbench/fast_client), background rows
++# sampled 1/20 (the runner holds every row in memory: 100+ fast background clients for minutes exhaust a node)
++[[ $BACKEND == pgcopy ]] && RUN_ENV+=(BENCH_FAST_CLIENT=1 "PYTHONPATH=$REPO/microbench/fast_client" BENCH_BG_SAMPLE=20)
+ bg=${BG,,}
+ DIR="$OUTROOT/branch_create/$bg"
+ 
+@@ -44,7 +48,7 @@ one() {  # n
+         --background-op "$BG" "${COMMON[@]}" --output-dir "$DIR"
+ }
+ 
+-wl_start "ns=$NS background=$BG creates=$CREATES connect_every=$CONNECT_EVERY opts=${NEON_LOCAL_COMPUTE_OPTS:-}"
++wl_start "ns=$NS background=$BG creates=$CREATES connect_every=$CONNECT_EVERY opts=${NEON_LOCAL_COMPUTE_OPTS:-${PGCOPY_INSTANCE_OPTS:-}}"
+ IFS=',' read -ra NLIST <<< "$NS"
+ for n in "${NLIST[@]}"; do
+     if is_done "create_${bg}_n${n}"; then log "SKIP  create_${bg}_n${n} (done before)"; continue; fi
+diff --git a/scripts/workloads/scaling_data.sh b/scripts/workloads/scaling_data.sh
+index 0a6cd8f..5f4042b 100755
+--- a/scripts/workloads/scaling_data.sh
++++ b/scripts/workloads/scaling_data.sh
+@@ -8,7 +8,7 @@
+ # least 3,000 / 600 / 2,500 / 2,500 per client, but at most 1,000,000 reads and 640,000 writes per run (the
+ # runner keeps every result row in memory until the run ends).
+ #
+-#   scripts/workloads/scaling_data.sh --topology T --backend neon|doltgres --outdir DIR \
++#   scripts/workloads/scaling_data.sh --topology T --backend neon|doltgres|pgcopy --outdir DIR \
+ #       [--ns 1,4,...] [--ops READ,...] [--ceiling [--ceiling-ns 128,256,...] [--ceiling-seconds 30]] [--smoke] [--dry-run]
+ #
+ # --ceiling: after the sweep, ceiling_check.py (experiment 5's minimal asyncio client, same load shape) at the
+@@ -32,10 +32,9 @@ wl_init scaling_data
+ NS=${NS_ARG:-$NS_DATA}
+ $SMOKE && NS=${NS_ARG:-1,4}
+ RUN_ENV=()
+-if [[ $BACKEND == neon ]]; then
+-    export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts false true)"
+-    RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
+-fi
++[[ $BACKEND == neon ]] && export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts false true)"
++[[ $BACKEND == pgcopy ]] && export PGCOPY_INSTANCE_OPTS="$(pgcopy_opts false)"
++prewarm_backend && RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
+ 
+ ops_per_client() {  # OP N (experiment 5's run_scaling.sh)
+     local op=$1 n=$2 total min cap
+@@ -59,7 +58,7 @@ one() {  # op n
+         --output-dir "$dir"   # one directory per op: the parquet name has no op in it
+ }
+ 
+-wl_start "ns=$NS ops='$DATA_OPS' prewarm_heap_blocks=$PREWARM_HEAP_BLOCKS opts=${NEON_LOCAL_COMPUTE_OPTS:-}"
++wl_start "ns=$NS ops='$DATA_OPS' prewarm_heap_blocks=$PREWARM_HEAP_BLOCKS opts=${NEON_LOCAL_COMPUTE_OPTS:-${PGCOPY_INSTANCE_OPTS:-}}"
+ IFS=',' read -ra NLIST <<< "$NS"
+ for n in "${NLIST[@]}"; do
+     for op in $DATA_OPS; do
+diff --git a/dblib/pgcopy.py b/dblib/pgcopy.py
+new file mode 100644
+index 0000000..360f83a
+--- /dev/null
++++ b/dblib/pgcopy.py
+@@ -0,0 +1,400 @@
++"""Shared-nothing branching by copying PostgreSQL data directories to cluster nodes (``pgcopy``, experiment 13).
++
++A branch is a fresh PostgreSQL 17 instance on some node whose data directory was copied over the network from the
++parent's live instance (``pg_basebackup``), then started. Instances are run by the pgcopy node agent
++(scripts/setup/pgcopy_node_agent.py), one per node; this module only talks HTTP to the agents.
++
++- ``branch``: one ``POST /instances`` on the agent that will host the branch: copy from the parent, start, wait
++  until it accepts connections. The timed BRANCH row is copy + start (+ HTTP); the agent's split (``copy_ms``,
++  ``start_ms``, ``bytes``) is kept in ``PgCopyToolSuite.OBSERVED`` and in the agent's archive (forks.jsonl).
++- ``commit`` records the WAL flush LSN; ``delete`` stops the instance and removes its directory. diff, merge,
++  rebase, revert, reset and commit refs are unsupported (as for ``neon_local``).
++- The run root (branch "main") is a copy of the seed instance on the root agent (the seed node); every other
++  branch is copied from its parent, so a branch of main is always a network copy from the seed node.
++
++Instance names derive from the run nonce and the branch name (as ``neon_local``'s timeline ids), so every process
++resolves a branch from its name alone. ``setup_run`` sets the nonce and the run root in ``os.environ``.
++
++Placement: with ``PGCOPY_LOCAL_AGENT`` set (co-located clients, the experiment's mode) every branch this process
++creates is placed on that agent and connections to it go to 127.0.0.1; otherwise a branch goes to the agent its id
++hashes to in ``PGCOPY_AGENTS`` (numbered branches ``*_<i>`` spread round-robin).
++
++Environment:
++    PGCOPY_AGENTS           http://10.10.1.2:9100,... (host agents)
++    PGCOPY_ROOT_AGENT       http://10.10.1.1:9100 (the seed node: seed instance and run roots)
++    PGCOPY_LOCAL_AGENT      this node's agent (co-located mode; optional)
++    PGCOPY_SEED_INSTANCE    seed (default)
++    PGCOPY_PG_USER, PGCOPY_PG_PASSWORD, PGCOPY_DB (default bench)
++    PGCOPY_SHARED_BUFFERS   shared_buffers of new instances (default: the agent's)
++    PGCOPY_INSTANCE_OPTS    optional JSON merged into every create request (e.g. {"statement_log": false})
++    PGCOPY_START_ON_BRANCH  1 (default): branch = copy + start; 0: copy only, start on first connect
++    PGCOPY_PURGE_PARALLEL   agents purged at once (default: all)
++    PGCOPY_RUN_NONCE, PGCOPY_RUN_ROOT   set by setup_run
++"""
++
++import hashlib
++import json
++import os
++import re
++import secrets
++import socket
++import threading
++from concurrent.futures import ThreadPoolExecutor
++from typing import Optional
++
++import psycopg2
++
++from dblib import result_collector as rc
++from dblib.db_api import DBToolSuite, Ref
++from dblib.neon_local import http
++
++MAIN_BRANCH = "main"
++HTTP_TIMEOUT = 900
++
++
++def _env(name: str, default: Optional[str] = None) -> str:
++    v = os.environ.get(name, default)
++    if v is None or v == "":
++        raise RuntimeError(f"{name} is not set (see dblib/pgcopy.py)")
++    return v
++
++
++def _list(name: str) -> list:
++    return [x.strip().rstrip("/") for x in os.environ.get(name, "").split(",") if x.strip()]
++
++
++def seed_instance() -> str:
++    return os.environ.get("PGCOPY_SEED_INSTANCE") or "seed"
++
++
++def root_agent() -> str:
++    return _env("PGCOPY_ROOT_AGENT").rstrip("/")
++
++
++def local_agent() -> str:
++    return (os.environ.get("PGCOPY_LOCAL_AGENT") or "").strip().rstrip("/")
++
++
++def agents() -> list:
++    return _list("PGCOPY_AGENTS")
++
++
++_NUMBERED = re.compile(r"_(\d+)$")
++
++
++def instance_id_for(branch: str) -> str:
++    """The run root for "main", else md5(nonce/branch). A numbered branch (``*_<i>``) is shifted so that it maps to
++    agent i mod (number of agents) in agent_for when no local agent is set (as neon_local.timeline_id_for)."""
++    if branch == MAIN_BRANCH:
++        return _env("PGCOPY_RUN_ROOT")
++    iid = int(hashlib.md5(f"{_env('PGCOPY_RUN_NONCE')}/{branch}".encode()).hexdigest(), 16)
++    m = _NUMBERED.search(branch)
++    k = len(agents())
++    if m and k > 1:
++        iid = iid - iid % k + (int(m.group(1)) - 1) % k
++        if iid < 0:
++            iid += k
++    return f"{iid:032x}"
++
++
++def agent_for(instance_id: str) -> str:
++    """The agent that holds (or will hold) an instance: the root agent for the seed and run roots, this node's
++    agent in co-located mode, else the agent the id hashes to."""
++    if instance_id in (seed_instance(), os.environ.get("PGCOPY_RUN_ROOT")) or instance_id.startswith("root_"):
++        return root_agent()
++    if local_agent():
++        return local_agent()
++    ags = agents()
++    if not ags:
++        raise RuntimeError("PGCOPY_AGENTS is empty and no PGCOPY_LOCAL_AGENT is set")
++    try:
++        return ags[int(instance_id, 16) % len(ags)]
++    except ValueError:   # a non-hex name (smoke tests, cold_<k>): hash it
++        return ags[int(hashlib.md5(instance_id.encode()).hexdigest(), 16) % len(ags)]
++
++
++_LOCAL_ADDRS: Optional[set] = None
++
++
++def _local_addrs() -> set:
++    global _LOCAL_ADDRS
++    if _LOCAL_ADDRS is None:
++        out = {"127.0.0.1", "localhost"}
++        try:
++            out |= {a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None)}
++        except OSError:
++            pass
++        try:
++            import subprocess
++            out |= set(subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout.split())
++        except Exception:
++            pass
++        _LOCAL_ADDRS = out
++    return _LOCAL_ADDRS
++
++
++def connect_host(agent: str, host: str) -> str:
++    """Address a client uses for an instance the agent reports at `host`: loopback when the agent is this node's."""
++    if agent == local_agent() or host in _local_addrs():
++        return "127.0.0.1"
++    return host
++
++
++def _opts() -> dict:
++    raw = os.environ.get("PGCOPY_INSTANCE_OPTS", "").strip()
++    return json.loads(raw) if raw else {}
++
++
++def _start_on_branch() -> bool:
++    return os.environ.get("PGCOPY_START_ON_BRANCH", "1").strip() not in ("0", "false", "no")
++
++
++def get_instance(instance_id: str, agent: Optional[str] = None) -> Optional[dict]:
++    status, body = http("GET", f"{agent or agent_for(instance_id)}/instances/{instance_id}", timeout=120)
++    if status == 404:
++        return None
++    if status != 200:
++        raise RuntimeError(f"instance {instance_id}: HTTP {status} {body}")
++    return body
++
++
++def create_instance(instance_id: str, parent_id: Optional[str], parent_agent: Optional[str] = None,
++                    agent: Optional[str] = None, start: Optional[bool] = None, init: bool = False,
++                    parent_role: bool = False, extra: Optional[dict] = None) -> dict:
++    """Copy parent_id's data directory to a new instance on `agent` (default agent_for) and (by default) start it.
++    Returns the agent's reply: {name, host, port, copy_ms, start_ms, bytes, started, agent}."""
++    agent = agent or agent_for(instance_id)
++    body = {"name": instance_id, "init": init, "parent_role": parent_role,
++            "start": _start_on_branch() if start is None else start}
++    if parent_id is not None:
++        pa = parent_agent or agent_for(parent_id)
++        p = get_instance(parent_id, pa)
++        if p is None:
++            raise RuntimeError(f"parent instance {parent_id} not found on {pa}")
++        body["parent"] = {"host": p["host"], "port": p["port"], "name": parent_id}
++    sb = os.environ.get("PGCOPY_SHARED_BUFFERS")
++    if sb:
++        body["shared_buffers"] = sb
++    body.update(_opts())
++    body.update(extra or {})
++    status, resp = http("POST", f"{agent}/instances", body, timeout=HTTP_TIMEOUT)
++    if status != 200:
++        raise RuntimeError(f"instance create {instance_id} from {parent_id}: HTTP {status} {resp}")
++    resp["agent"] = agent
++    return resp
++
++
++def start_instance(instance_id: str, agent: Optional[str] = None) -> dict:
++    agent = agent or agent_for(instance_id)
++    status, resp = http("POST", f"{agent}/instances/{instance_id}/start", {}, timeout=HTTP_TIMEOUT)
++    if status != 200:
++        raise RuntimeError(f"instance start {instance_id}: HTTP {status} {resp}")
++    resp["agent"] = agent
++    return resp
++
++
++def delete_instance(instance_id: str, agent: Optional[str] = None) -> None:
++    status, body = http("DELETE", f"{agent or agent_for(instance_id)}/instances/{instance_id}", timeout=300)
++    if status not in (200, 404):
++        raise RuntimeError(f"instance delete {instance_id}: HTTP {status} {body}")
++
++
++def instance_sql(instance_id: str, sql: str, db: str = "postgres", agent: Optional[str] = None) -> str:
++    status, resp = http("POST", f"{agent or agent_for(instance_id)}/instances/{instance_id}/sql",
++                        {"sql": sql, "db": db}, timeout=7200)
++    if status != 200:
++        raise RuntimeError(f"SQL on {instance_id}: HTTP {status} {resp}")
++    return resp["stdout"]
++
++
++def all_agents() -> list:
++    return list(dict.fromkeys([root_agent()] + agents() + ([local_agent()] if local_agent() else [])))
++
++
++def purge(log=print, parallel: Optional[int] = None) -> int:
++    """Delete every instance on every agent except the seed (the root agent protects it). Returns the count."""
++    ags = all_agents()
++    parallel = parallel or int(os.environ.get("PGCOPY_PURGE_PARALLEL") or len(ags))
++    with ThreadPoolExecutor(max(1, min(parallel, len(ags)))) as ex:
++        res = list(ex.map(lambda a: http("DELETE", f"{a}/instances", timeout=1800), ags))
++    bad = [(a, r) for a, r in zip(ags, res) if r[0] != 200]
++    if bad:
++        raise RuntimeError(f"purge: {bad}")
++    n = sum((r[1] or {}).get("deleted", 0) for r in res if isinstance(r[1], dict))
++    if n:
++        log(f"pgcopy purge: deleted {n} instances on {len(ags)} agents")
++    return n
++
++
++def new_run(db_name: str) -> str:
++    """Nonce and run-root name for a run, published in os.environ."""
++    nonce = secrets.token_hex(6)
++    os.environ["PGCOPY_RUN_NONCE"] = nonce
++    root = "root_" + hashlib.md5(f"{nonce}/{db_name}/root".encode()).hexdigest()[:26]
++    os.environ["PGCOPY_RUN_ROOT"] = root
++    return root
++
++
++def create_run_root(root: str, log=print) -> dict:
++    r = create_instance(root, seed_instance(), parent_agent=root_agent(), agent=root_agent(), start=True,
++                        parent_role=True)
++    log(f"pgcopy run root {root} (branch '{MAIN_BRANCH}') copied from {seed_instance()} in "
++        f"{r.get('copy_ms', 0):.0f} ms + start {r.get('start_ms', 0):.0f} ms, nonce {os.environ['PGCOPY_RUN_NONCE']}")
++    return r
++
++
++def setup_run(db_name: str, log=print) -> str:
++    """Start a run: delete leftovers, copy the run root ("main") from the seed instance on the root agent."""
++    purge(log=log)
++    root = new_run(db_name)
++    create_run_root(root, log)
++    return root
++
++
++def teardown_run(db_name: str, log=print) -> None:
++    purge(log=log)
++
++
++# ----------------------------------------------------------------------------
++# The suite
++# ----------------------------------------------------------------------------
++
++
++class PgCopyToolSuite(DBToolSuite):
++    BACKEND_NAME = "pgcopy"
++    STORAGE_SCOPE = "server"
++    SCHEMA_DIALECT = "postgres"
++    SUPPORTS_COMMIT_REFS = False
++    SUPPORTS_MULTI_REF_EXEC = False
++
++    # instance id -> (host, port), shared by the suites of one process
++    _INSTANCES: dict = {}
++    _LOCK = threading.Lock()
++    # fork phase totals of this process (the summary's backend_observations; per-fork rows: agent forks.jsonl)
++    OBSERVED: dict = {}
++
++    @classmethod
++    def _observe(cls, **kv) -> None:
++        with cls._LOCK:
++            for k, v in kv.items():
++                if v is not None:
++                    cls.OBSERVED[k] = cls.OBSERVED.get(k, 0) + v
++
++    @classmethod
++    def init_for_bench(cls, collector: rc.ResultCollector, db_name: str, default_branch: str,
++                       measure_storage: bool = False):
++        return cls(collector, default_branch or MAIN_BRANCH, measure_storage)
++
++    def __init__(self, collector: rc.ResultCollector, default_branch: str = MAIN_BRANCH,
++                 measure_storage: bool = False):
++        super().__init__(None, collector, measure_storage)
++        self._current_ref = Ref(default_branch)   # known, not connected (the first statement connects)
++        self.last_fork: Optional[dict] = None
++
++    # -- connections ---------------------------------------------------
++
++    def _address(self, instance_id: str, refresh: bool = False):
++        with self._LOCK:
++            hit = None if refresh else self._INSTANCES.get(instance_id)
++        if hit:
++            return hit
++        agent = agent_for(instance_id)
++        info = get_instance(instance_id, agent)
++        if info is None:
++            raise RuntimeError(f"no instance {instance_id} on {agent}")
++        if not info.get("running"):
++            info = start_instance(instance_id, agent)
++        hp = (connect_host(agent, info["host"]), int(info["port"]))
++        with self._LOCK:
++            self._INSTANCES[instance_id] = hp
++        return hp
++
++    def _open(self, instance_id: str):
++        last = None
++        for attempt in range(3):
++            host, port = self._address(instance_id, refresh=attempt > 0)
++            try:
++                conn = psycopg2.connect(host=host, port=port, dbname=_env("PGCOPY_DB", "bench"),
++                                        user=_env("PGCOPY_PG_USER", "bench"),
++                                        password=os.environ.get("PGCOPY_PG_PASSWORD", ""), connect_timeout=60)
++                conn.autocommit = True
++                return conn
++            except psycopg2.OperationalError as e:
++                last = e
++        raise last
++
++    def _connect_impl(self, ref: Ref) -> None:
++        if ref.commit:
++            raise ValueError("pgcopy does not support commit refs")
++        iid = instance_id_for(ref.branch)
++        if self.conn is not None:
++            try:
++                self.conn.close()
++            except Exception:
++                pass
++            self.conn = None
++        self.conn = self._open(iid)
++
++    def _connect(self, ref: Ref, exec_id: int, timed: bool, label: str, fallback: bool):
++        if self.conn is None or getattr(self.conn, "closed", 0):
++            self._current_ref = None
++        return super()._connect(ref, exec_id, timed, label, fallback)
++
++    def _ensure_conn(self):
++        if self.conn is None or getattr(self.conn, "closed", 0):
++            ref = self._current_ref or Ref(MAIN_BRANCH)
++            self._connect_impl(ref)
++            self._current_ref = ref
++        return self.conn
++
++    def get_current_connection(self):
++        return self._ensure_conn()
++
++    def _execute(self, query: str, vars=None):
++        self._ensure_conn()
++        return super()._execute(query, vars)
++
++    def close_connection(self) -> None:
++        if self.conn is not None:
++            try:
++                self.conn.close()
++            except Exception:
++                pass
++        self.conn = None
++
++    # -- verbs -----------------------------------------------------------
++
++    def _branch_impl(self, name: str, from_ref: Ref) -> None:
++        iid = instance_id_for(name)
++        r = create_instance(iid, instance_id_for(from_ref.branch))
++        self.last_fork = r
++        if r.get("running"):
++            with self._LOCK:
++                self._INSTANCES[iid] = (connect_host(r["agent"], r["host"]), int(r["port"]))
++        self._observe(forks=1, fork_copy_ms=r.get("copy_ms"), fork_start_ms=r.get("start_ms"),
++                      fork_bytes=r.get("bytes"))
++
++    def _commit_impl(self, ref: Ref, message: str) -> str:
++        if self._current_ref != Ref(ref.branch) or self.conn is None:
++            self._connect_impl(Ref(ref.branch))
++            self._current_ref = Ref(ref.branch)
++        return self._execute("SELECT pg_current_wal_flush_lsn()::text")[0][0]
++
++    def _delete_impl(self, ref: Ref) -> None:
++        if ref.branch == MAIN_BRANCH:
++            raise ValueError("the run root cannot be deleted")
++        iid = instance_id_for(ref.branch)
++        if self._current_ref and self._current_ref.branch == ref.branch:
++            self.close_connection()
++            self._current_ref = None
++        delete_instance(iid)
++        with self._LOCK:
++            self._INSTANCES.pop(iid, None)
++
++    def _storage_bytes(self) -> int:
++        total = 0
++        for a in all_agents():
++            status, body = http("GET", f"{a}/stats", timeout=60)
++            if status == 200 and isinstance(body, dict):
++                total += int(body.get("data_bytes") or 0)
++        return total
+diff --git a/scripts/setup/pgcopy.py b/scripts/setup/pgcopy.py
+new file mode 100644
+index 0000000..dfac494
+--- /dev/null
++++ b/scripts/setup/pgcopy.py
+@@ -0,0 +1,383 @@
++#!/usr/bin/env python3
++"""Deploy and operate the pgcopy backend (experiment 13) as a topology's [pgcopy] section describes it.
++
++Every node of [pgcopy] (seed + hosts) runs two systemd units: pgcopy-agent (scripts/setup/pgcopy_node_agent.py:
++instances, copies) and dbfork-cpu-agent (scripts/setup/cpu_agent.py), both listening on the node's LAN address only.
++The coordinator may be outside the cluster (experiment 13: pc20 at UMass, ssh to the nodes' public names): it never
++calls an agent itself. Everything that talks to the agents runs on a cluster node through scripts/setup/pgcopy_ctl.py
++(on this machine when it is a node of the topology, else over ssh on the seed node).
++
++  pgcopy.py TOPO install            PGDG PostgreSQL 17 (no default cluster), kernel.shmmni, RemoveIPC=no, the
++                                    cluster-internal ssh key (~/.ssh/cluster_ed25519 on every node, LAN only), agent
++                                    files; on every node in parallel
++  pgcopy.py TOPO start | stop | restart | status
++  pgcopy.py TOPO seed [--scale W]   the seed instance on the seed node, loaded with CH-benCHmark W ->
++                                    <state_dir>/pgcopy_seed.json, then env-init
++  pgcopy.py TOPO env-init           <state_dir>/pgcopy.env (the client's view) and pgcopy.<node>.env for every node
++  pgcopy.py TOPO deploy-client [--nodes n1,n2]
++                                    repo + uv venv on every host (default), its own view as <state_dir>/pgcopy.env,
++                                    pgcopy_seed.json
++  pgcopy.py TOPO purge | smoke | clock-check
++  pgcopy.py TOPO wipe --yes         stop, then delete every instance (the seed too) and the state files
++  pgcopy.py TOPO pull-archive DEST  every agent's archive (forks.jsonl, failures, kept logs) -> DEST/<node>/
++
++Every command takes --dry-run (print commands and files, run nothing).
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import shlex
++import subprocess
++import sys
++from concurrent.futures import ThreadPoolExecutor
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++REPO = HERE.parents[1]
++sys.path.insert(0, str(HERE))
++
++from nodes import Runner, die, log  # noqa: E402
++from topo import Node, Topo, TopoError, env_text, read_seed, write_env  # noqa: E402
++
++REMOTE_REPO = "~/db-fork"
++AGENT_UNIT = "pgcopy-agent"
++SVC_FILES = ("pgcopy_node_agent.py", "cpu_agent.py")
++SHMMNI = 32768
++APT_PACKAGES = ("rsync", "curl", "ca-certificates", "postgresql-common")
++CLUSTER_KEY = "~/.ssh/cluster_ed25519"
++PGDG_KEY_URL = "https://www.postgresql.org/media/keys/ACCC4CF8.asc"
++
++
++def q(s) -> str:
++    return shlex.quote(str(s))
++
++
++class PgCopy:
++    def __init__(self, topo: Topo, dry: bool):
++        if not topo.pgcopy:
++            raise TopoError("topology has no [pgcopy] section")
++        self.t, self.p, self.dry = topo, topo.pgcopy, dry
++        self.r = Runner(topo, dry)
++        self.coord = Node("coordinator", {}, topo)
++        self.state = topo.state_dir
++        self.seed_node = topo.node(self.p["seed"])
++        self.hosts = [topo.node(x) for x in self.p["hosts"]]
++        self.client = topo.node(self.p["client"])
++        self.nodes = topo.pgcopy_nodes()
++        self.w = topo.wl("pgcopy")
++        self.pgv = int(self.p["pg_version"])
++        self._home: dict[str, str] = {}
++
++    # ---------------------------------------------------------------- paths
++    def home(self, node: Node) -> str:
++        if node.name not in self._home:
++            self._home[node.name] = f"/users/{self.t.ssh_user}" if self.dry else self.r.out(node, "echo $HOME")
++        return self._home[node.name]
++
++    def x(self, node: Node, path: str) -> str:
++        return self.home(node) + path[1:] if path.startswith("~") else path
++
++    def root(self, node: Node) -> str:
++        return self.x(node, self.t.pgcopy_root(node))
++
++    def d(self, node: Node, sub: str) -> str:
++        return f"{self.root(node)}/{sub}"
++
++    def here(self) -> Node | None:
++        """The topology node this machine is (its LAN or public address is configured here), if any."""
++        for n in self.nodes:
++            if n.is_here():
++                return n
++        return None
++
++    def parallel(self, fn, items) -> list:
++        items = list(items)
++        if self.dry or len(items) < 2:
++            return [fn(it) for it in items]
++        with ThreadPoolExecutor(min(16, len(items))) as ex:
++            return list(ex.map(fn, items))
++
++    def write_coord(self, path: str, text: str) -> None:
++        if self.dry:
++            print(f"[coordinator] write {path}:\n    " + text.rstrip("\n").replace("\n", "\n    "))
++            return
++        Path(path).parent.mkdir(parents=True, exist_ok=True)
++        Path(path).write_text(text)
++
++    def to_file(self, node: Node, cmd: str, dst: str) -> None:
++        argv = self.r.ssh_argv(node) + ["bash -c " + q(cmd)]
++        if self.dry:
++            print(f"[{node.name}] $ {cmd} > (coordinator) {dst}")
++            return
++        Path(dst).parent.mkdir(parents=True, exist_ok=True)
++        with open(dst + ".tmp", "wb") as f:
++            subprocess.run(argv, stdout=f, check=True)
++        os.replace(dst + ".tmp", dst)
++
++    def ensure_state_dir(self, node: Node) -> None:
++        s = self.state
++        self.r.run(node, f"mkdir -p {s} 2>/dev/null || {{ sudo -n mkdir -p {s} && "
++                         f"sudo -n chown $(id -u):$(id -g) {s}; }}")
++
++    # ---------------------------------------------------------------- install
++    def install(self) -> None:
++        self.cluster_key()
++        log(f"prepare {len(self.nodes)} nodes (PostgreSQL {self.pgv} from PGDG, sysctl, logind, ssh key, agent files)")
++        self.parallel(self.prepare, self.nodes)
++        log("installed")
++
++    def cluster_key(self) -> None:
++        """A key only the nodes use to reach each other over the LAN (the multi-node driver, ssh to the own node);
++        made here once, never the coordinator's own key."""
++        k = os.path.expanduser(CLUSTER_KEY)
++        if self.dry:
++            print(f"[coordinator] ssh-keygen -t ed25519 -N '' -f {k} (unless it exists)")
++            return
++        if not Path(k).exists():
++            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"{self.t.name} cluster-internal",
++                            "-f", k], check=True)
++            log(f"made {k}")
++
++    def prepare(self, node: Node) -> None:
++        dr = self.x(node, node.data_root)
++        v = self.pgv
++        pk = " ".join(APT_PACKAGES)
++        lines = [
++            "set -euo pipefail",
++            "export DEBIAN_FRONTEND=noninteractive",
++            # no default cluster: the agent runs every instance (a packaged 17/main would listen on 5432)
++            "sudo -n mkdir -p /etc/postgresql-common/createcluster.d",
++            "echo 'create_main_cluster = false' | sudo -n tee /etc/postgresql-common/createcluster.d/"
++            "90-no-main.conf >/dev/null",
++            f"need=''; for p in {pk}; do dpkg -s $p >/dev/null 2>&1 || need=\"$need $p\"; done",
++            "if [ -n \"$need\" ]; then sudo -n apt-get update -qq >/dev/null 2>&1 || true; "
++            "sudo -n apt-get install -y -qq $need >/dev/null; fi",
++            f"if ! dpkg -s postgresql-{v} >/dev/null 2>&1; then",
++            "  sudo -n install -d /usr/share/postgresql-common/pgdg",
++            f"  sudo -n curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc {PGDG_KEY_URL}",
++            "  echo \"deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] "
++            "https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main\" | "
++            "sudo -n tee /etc/apt/sources.list.d/pgdg.list >/dev/null",
++            "  sudo -n apt-get update -qq >/dev/null 2>&1",
++            f"  sudo -n apt-get install -y -qq postgresql-{v} postgresql-client-{v} >/dev/null",
++            "fi",
++            f"for c in $(pg_lsclusters -h 2>/dev/null | awk '{{print $1\"/\"$2}}'); do "
++            "sudo -n pg_dropcluster --stop ${c%/*} ${c#*/}; done",
++            "sudo -n systemctl disable --now postgresql >/dev/null 2>&1 || true",
++            f"echo 'kernel.shmmni = {SHMMNI}' | sudo -n tee /etc/sysctl.d/90-pgcopy.conf >/dev/null",
++            "sudo -n sysctl -q -p /etc/sysctl.d/90-pgcopy.conf",
++            "grep -q '^RemoveIPC=no' /etc/systemd/logind.conf || { echo RemoveIPC=no | sudo -n tee -a "
++            "/etc/systemd/logind.conf >/dev/null && sudo -n systemctl restart systemd-logind; }",
++            f"sudo -n chown $(id -u):$(id -g) {dr}",
++            f"mkdir -p {self.d(node, 'svc')} {self.d(node, 'instances')} {self.d(node, 'archive')}",
++            f"echo \"  $(hostname -s): $(/usr/lib/postgresql/{v}/bin/postgres --version), "
++            "shmmni $(sysctl -n kernel.shmmni), $(df -h --output=avail " + dr + " | tail -1) free\"",
++        ]
++        self.r.run(node, "\n".join(lines))
++        self.r.run(node, f"mkdir -p {self.state} 2>/dev/null || {{ sudo -n mkdir -p {self.state} && "
++                         f"sudo -n chown $(id -u):$(id -g) {self.state}; }}")
++        for f in SVC_FILES:
++            self.r.rsync(node, str(HERE / f), f"{self.d(node, 'svc')}/{f}")
++        self.install_key(node)
++
++    def install_key(self, node: Node) -> None:
++        k = os.path.expanduser(CLUSTER_KEY)
++        if self.dry:
++            print(f"[{node.name}] install {CLUSTER_KEY}(.pub), authorized_keys line, ~/.ssh/config for the LAN")
++            return
++        priv, pub = Path(k).read_text(), Path(k + ".pub").read_text().strip()
++        self.r.put(node, CLUSTER_KEY, priv, mode=0o600)
++        self.r.put(node, CLUSTER_KEY + ".pub", pub + "\n", mode=0o644)
++        lan = ".".join(self.seed_node.lan.split(".")[:3]) + ".*"
++        cfg = (f"# pgcopy cluster-internal key ({self.t.name})\nHost {lan}\n    IdentityFile {CLUSTER_KEY}\n"
++               "    StrictHostKeyChecking accept-new\n    BatchMode yes\n")
++        self.r.run(node, f"touch ~/.ssh/authorized_keys ~/.ssh/config && chmod 600 ~/.ssh/authorized_keys ~/.ssh/config"
++                         f" && (grep -qF {q(pub)} ~/.ssh/authorized_keys || echo {q(pub)} >> ~/.ssh/authorized_keys)"
++                         f" && (grep -qF {q('Host ' + lan)} ~/.ssh/config || printf %s {q(cfg)} >> ~/.ssh/config)")
++
++    # ---------------------------------------------------------------- services
++    def agent_argv(self, node: Node) -> list[str]:
++        port = self.t.ports["pgcopy_agent"]
++        return ["python3", f"{self.d(node, 'svc')}/pgcopy_node_agent.py", "--listen", f"{node.lan}:{port}",
++                "--host", node.lan, "--pg-bin", f"/usr/lib/postgresql/{self.pgv}/bin",
++                "--instance-root", self.d(node, "instances"), "--archive-dir", self.d(node, "archive"),
++                "--protect", "seed", "--shared-buffers", str(self.w["shared_buffers"]),
++                "--pg-port-base", str(self.t.ports["pgcopy_pg"]), "--disk-guard-gb", str(self.w["disk_guard_gb"]),
++                "--fstrim"]
++
++    def start(self) -> None:
++        def one(node: Node) -> None:
++            svc = self.d(node, "svc")
++            self.r.cpu_agent_service(node, svc, bind=node.lan)
++            self.r.systemd_unit(node, AGENT_UNIT, self.agent_argv(node), wrapper_dir=svc, which="client")
++            port = self.t.ports["pgcopy_agent"]
++            self.r.run(node, f"for i in $(seq 120); do curl -sf http://{node.lan}:{port}/time >/dev/null && "
++                             f"curl -sf 'http://{node.lan}:{self.t.ports['cpu_agent']}/cpu?set=server' >/dev/null "
++                             f"&& exit 0; sleep 1; done; echo 'agents did not answer' >&2; exit 1")
++        self.parallel(one, self.nodes)
++        log(f"agents up on {len(self.nodes)} nodes")
++
++    def stop(self) -> None:
++        self.parallel(lambda n: self.r.stop_unit(n, AGENT_UNIT), self.nodes)
++        log("pgcopy agents stopped (their instances with them; the seed is restarted by the next start)")
++
++    def status(self) -> None:
++        def one(node: Node) -> str:
++            return self.r.out(node, f"echo \"{node.name}: agent $(systemctl is-active {AGENT_UNIT}), cpu "
++                                    f"$(systemctl is-active {self.r.CPU_UNIT}), $(pgrep -u $(id -u) -x postgres | wc -l)"
++                                    f" postgres processes, $(df -h --output=avail {self.x(node, node.data_root)} | "
++                                    "tail -1) free\"", check=False)
++        for line in self.parallel(one, self.nodes):
++            print(line)
++        if read_seed(self.t, "pgcopy") or self.dry:
++            self.ctl(["status"])
++
++    def wipe(self, yes: bool) -> None:
++        if not yes:
++            die("wipe deletes every instance, the seed too: pass --yes")
++        self.stop()
++        self.parallel(lambda n: self.r.run(n, f"rm -rf {self.d(n, 'instances')} && mkdir -p {self.d(n, 'instances')}"),
++                      self.nodes)
++        files = " ".join(f"{self.state}/{f}" for f in ("pgcopy_seed.json", "pgcopy.env", "pgcopy_seeding.env"))
++        self.r.run(self.coord, f"rm -f {files} {self.state}/pgcopy.n*.env", check=False)
++        self.parallel(lambda n: self.r.run(n, f"rm -f {files}", check=False), self.nodes)
++        log("wiped (agent archives kept: pull-archive, then delete <data_root>/pgcopy/archive by hand)")
++
++    # ---------------------------------------------------------------- ctl on a node
++    def deploy(self, node: Node) -> None:
++        self.r.deploy_repo(node, REPO, REMOTE_REPO)
++        self.ensure_state_dir(node)
++
++    def ctl(self, args: list, node: Node | None = None, env: dict | None = None, env_file: str | None = None) -> None:
++        """scripts/setup/pgcopy_ctl.py on a cluster node: here if this machine is one, else the seed node over ssh."""
++        me = self.here()
++        node = node or me or self.seed_node
++        if env is None:
++            env = self.t.pgcopy_env(node.name)
++        env_file = env_file or f"{self.state}/pgcopy.ctl.{node.name}.env"
++        text = env_text(env)
++        argv = " ".join(q(a) for a in args)
++        if me is not None and node.name == me.name:
++            self.write_coord(env_file, text)
++            cmd = f"cd {REPO} && uv run python scripts/setup/pgcopy_ctl.py --env {env_file} {argv}"
++            if self.dry:
++                print(f"[{node.name}, here] $ {cmd}")
++                return
++            subprocess.run(["bash", "-c", f"export PATH=$HOME/.local/bin:$PATH && {cmd}"], check=True)
++            return
++        self.r.put(node, env_file, text, mode=0o600)
++        self.r.run(node, f"export PATH=$HOME/.local/bin:$PATH && cd {REMOTE_REPO} && "
++                         f"uv run python scripts/setup/pgcopy_ctl.py --env {env_file} {argv}")
++
++    def seed(self, scale: int | None, deploy: bool) -> None:
++        if read_seed(self.t, "pgcopy"):
++            die(f"{self.state}/pgcopy_seed.json exists: the deployment is seeded (wipe first to reseed)")
++        node, out = self.seed_node, f"{self.state}/pgcopy_seed.json"
++        if deploy and not node.is_here():
++            self.deploy(node)
++        env = self.t.pgcopy_env(node.name, seeding=True)
++        self.ctl(["seed", "--scale", scale or self.w["W"], "--shared-buffers", self.w["seed_shared_buffers"],
++                  "--out", out], node=node, env=env, env_file=f"{self.state}/pgcopy_seeding.env")
++        if not node.is_here():
++            self.to_file(node, f"cat {out}", out)
++        self.env_init()
++
++    def env_init(self) -> None:
++        print(write_env(self.t, "pgcopy", None, f"{self.state}/pgcopy.env") if not self.dry
++              else f"(write {self.state}/pgcopy.env)")
++        for n in self.nodes:
++            p = f"{self.state}/pgcopy.{n.name}.env"
++            self.write_coord(p, env_text(self.t.pgcopy_env(n.name)))
++
++    def deploy_client(self, names: list[str] | None) -> None:
++        """Every host is a client node: repo + venv, its own view as pgcopy.env, the seed record."""
++        self.env_init()
++        seed = Path(f"{self.state}/pgcopy_seed.json")
++        targets = [self.t.node(x) for x in names] if names else self.hosts
++
++        def one(node: Node) -> None:
++            if not node.is_here():
++                self.deploy(node)
++            view = env_text(self.t.pgcopy_env(node.name))
++            self.r.put(node, f"{self.state}/pgcopy.env", view, mode=0o600)
++            if seed.exists():
++                self.r.put(node, str(seed), seed.read_text(), mode=0o600)
++            elif self.dry:
++                print(f"[{node.name}] write {seed} (copy of the coordinator's)")
++        self.parallel(one, targets)
++        if not seed.exists() and not self.dry:
++            log(f"no {seed} yet (seed first, then deploy-client again)")
++        log(f"deployed to {len(targets)} nodes")
++
++    def pull_archive(self, dest: str) -> None:
++        for n in self.nodes:
++            dst = f"{os.path.abspath(dest)}/{n.name}"
++            try:
++                self.r.fetch(n, f"{self.d(n, 'archive')}/", dst)
++            except subprocess.CalledProcessError as e:
++                log(f"{n.name}: archive not (fully) pulled: {e}")
++
++
++def main(argv=None) -> int:
++    common = argparse.ArgumentParser(add_help=False)
++    common.add_argument("--dry-run", action="store_true", help="print commands and files; run nothing")
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
++                                 parents=[common])
++    ap.add_argument("topo")
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    for c in ("install", "start", "stop", "restart", "status", "env-init", "purge", "smoke", "clock-check"):
++        sub.add_parser(c, parents=[common])
++    p = sub.add_parser("seed", parents=[common])
++    p.add_argument("--scale", type=int)
++    p.add_argument("--no-deploy", action="store_true")
++    p = sub.add_parser("deploy-client", parents=[common])
++    p.add_argument("--nodes", help="comma list (default: every host)")
++    p = sub.add_parser("wipe", parents=[common])
++    p.add_argument("--yes", action="store_true")
++    p = sub.add_parser("pull-archive", parents=[common])
++    p.add_argument("dest")
++    a = ap.parse_args(argv)
++    try:
++        pc = PgCopy(Topo(a.topo), a.dry_run)
++        if a.dry_run:
++            print(f"# dry run: pgcopy.py {a.topo} {a.cmd} (nothing is executed)")
++        c = a.cmd
++        if c == "install":
++            pc.install()
++        elif c == "start":
++            pc.start()
++        elif c == "stop":
++            pc.stop()
++        elif c == "restart":
++            pc.stop()
++            pc.start()
++        elif c == "status":
++            pc.status()
++        elif c == "seed":
++            pc.seed(a.scale, not a.no_deploy)
++        elif c == "env-init":
++            pc.env_init()
++        elif c == "deploy-client":
++            pc.deploy_client(a.nodes.split(",") if a.nodes else None)
++        elif c in ("purge", "smoke"):
++            pc.ctl([c])
++        elif c == "clock-check":
++            out = f"{pc.state}/clock_offsets.json"
++            pc.ctl(["clock-check", "--out", out])
++        elif c == "wipe":
++            pc.wipe(a.yes)
++        elif c == "pull-archive":
++            pc.pull_archive(a.dest)
++    except TopoError as e:
++        print(f"topology error: {e}", file=sys.stderr)
++        return 2
++    except (RuntimeError, subprocess.CalledProcessError) as e:
++        print(f"error: {e}", file=sys.stderr)
++        return 1
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/scripts/setup/pgcopy_ctl.py b/scripts/setup/pgcopy_ctl.py
+new file mode 100644
+index 0000000..aac8ede
+--- /dev/null
++++ b/scripts/setup/pgcopy_ctl.py
+@@ -0,0 +1,188 @@
++#!/usr/bin/env python3
++"""pgcopy operations that talk to the node agents (experiment 13). Runs on a cluster node (the agents listen on LAN
++addresses only); scripts/setup/pgcopy.py calls it there over ssh with an environment file written for that node.
++
++  pgcopy_ctl.py --env FILE seed --scale W --shared-buffers SB --out JSON   seed instance on the root agent
++  pgcopy_ctl.py --env FILE purge                                           every instance but the seed
++  pgcopy_ctl.py --env FILE smoke                                           one fork per host agent, checked, deleted
++  pgcopy_ctl.py --env FILE status                                          agents' /stats
++  pgcopy_ctl.py --env FILE clock-check --out JSON                          agents' clock offsets (GET /time)
++"""
++import argparse
++import json
++import os
++import sys
++import time
++from concurrent.futures import ThreadPoolExecutor
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(REPO))
++os.chdir(REPO)
++
++
++def load_env(path: str) -> None:
++    from dotenv import dotenv_values
++    for k in list(os.environ):
++        if k.startswith("PGCOPY_") or k.startswith("DBFORK_"):
++            del os.environ[k]
++    for k, v in dotenv_values(path).items():
++        if v is not None:
++            os.environ[k] = v
++
++
++def seed(args) -> None:
++    from dblib import pgcopy as pc
++    from microbench import task2_pb2 as tp
++    from microbench.runner2 import BackendInfo, seed_generated_database
++
++    out = Path(args.out)
++    if out.exists():
++        raise SystemExit(f"{out} exists: the deployment is seeded (wipe first to reseed)")
++    ra, name = pc.root_agent(), pc.seed_instance()
++    t0 = time.time()
++    r = pc.create_instance(name, None, agent=ra, init=True, start=True, parent_role=True,
++                           extra={"shared_buffers": args.shared_buffers, "statement_log": False})
++    print(f"seed instance {name} on {ra}: {r['host']}:{r['port']}, initdb {r['copy_ms']:.0f} ms, "
++          f"start {r['start_ms']:.0f} ms", flush=True)
++    pc.instance_sql(name, "CREATE DATABASE bench OWNER bench", agent=ra)
++    pc.instance_sql(name, "CREATE EXTENSION IF NOT EXISTS pg_prewarm", db="bench", agent=ra)
++    os.environ.update({"PGCOPY_RUN_ROOT": name, "PGCOPY_RUN_NONCE": "seed"})
++    info = BackendInfo(default_branch_name="main", root_branch_name="main")
++    gen = tp.GeneratedData(scale_factor=args.scale)
++    stats = seed_generated_database(tp.Backend.PGCOPY, info, "bench", gen, args.scale)
++    import psycopg2
++    host = pc.connect_host(ra, r["host"])
++    conn = psycopg2.connect(host=host, port=r["port"], dbname="bench", user="bench", password="bench")
++    conn.autocommit = True
++    with conn.cursor() as cur:
++        t_vac = time.time()
++        cur.execute("VACUUM ANALYZE")
++        stats["vacuum_sec"] = round(time.time() - t_vac, 1)
++        cur.execute("CHECKPOINT")
++        cur.execute("SELECT c.relname, c.relkind, pg_relation_size(c.oid), c.reltuples::bigint FROM pg_class c "
++                    "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
++                    "AND c.relkind IN ('r', 'i') ORDER BY 3 DESC")
++        relations = {x[0]: {"kind": x[1], "bytes": x[2], "pages": x[2] // 8192, "rows": x[3]}
++                     for x in cur.fetchall()}
++        cur.execute("SELECT pg_database_size('bench'), (SELECT sum(pg_database_size(oid)) FROM pg_database)")
++        stats["database_bytes"], stats["cluster_bytes"] = (int(x) for x in cur.fetchone())
++        cur.execute("SELECT count(*) FROM stock")
++        stats["stock_rows"] = cur.fetchone()[0]
++        cur.execute("SHOW server_version")
++        stats["server_version"] = cur.fetchone()[0]
++    conn.close()
++    # A statement that hangs fails after 10 minutes instead of stopping a run (set after the load; experiment 8)
++    pc.instance_sql(name, "ALTER ROLE bench SET statement_timeout = '600s'", agent=ra)
++    inst = pc.get_instance(name, ra)
++    stats["seconds"] = round(time.time() - t0, 1)
++    doc = {"W": args.scale, "seed_instance": name, "root_agent": ra, "host": r["host"], "port": r["port"],
++           "seed_shared_buffers": args.shared_buffers, "instance_bytes": inst.get("bytes"), "stats": stats,
++           "relations": relations, "t": time.time()}
++    out.parent.mkdir(parents=True, exist_ok=True)
++    out.write_text(json.dumps(doc, indent=2))
++    print(f"database {stats['database_bytes'] / 2**20:.0f} MiB, {stats['stock_rows']:,} stock rows; largest: "
++          + ", ".join(f"{k} {v['bytes'] / 2**20:.0f} MiB" for k, v in list(relations.items())[:5])
++          + f"; {stats['seconds']} s", flush=True)
++
++
++def purge(_args) -> None:
++    from dblib import pgcopy as pc
++    n = pc.purge()
++    print(f"purged {n} instances", flush=True)
++
++
++def smoke(_args) -> None:
++    """A run root from the seed, then one fork of it on every host agent (in parallel), each checked with the seed's
++    stock row count and a write, then everything deleted."""
++    import psycopg2
++    from dblib import pgcopy as pc
++    pc.purge()
++    root = pc.new_run("smoke")
++    pc.create_run_root(root)
++    ra = pc.root_agent()
++    want = int(pc.instance_sql(root, "SELECT count(*) FROM stock", db="bench", agent=ra).strip())
++    agents = pc.agents()
++
++    def one(i_agent):
++        i, agent = i_agent
++        name = f"smoke_{i}"
++        r = pc.create_instance(name, root, parent_agent=ra, agent=agent)
++        c = psycopg2.connect(host=pc.connect_host(agent, r["host"]), port=r["port"], dbname="bench", user="bench",
++                             password="bench", connect_timeout=30)
++        c.autocommit = True
++        with c.cursor() as cur:
++            cur.execute("SELECT count(*) FROM stock")
++            got = cur.fetchone()[0]
++            cur.execute("UPDATE stock SET s_quantity = s_quantity + 1 WHERE s_w_id = 1 AND s_i_id = 1")
++        c.close()
++        pc.delete_instance(name, agent)
++        return {"agent": agent, "rows": got, "copy_ms": round(r["copy_ms"]), "start_ms": round(r["start_ms"]),
++                "mb": round(r["bytes"] / 2**20), "ok": got == want}
++
++    with ThreadPoolExecutor(len(agents)) as ex:
++        res = list(ex.map(one, enumerate(agents)))
++    for x in res:
++        print(json.dumps(x), flush=True)
++    left = {}
++    for a in pc.all_agents():
++        st, body = pc.http("GET", f"{a}/instances")
++        left[a] = [x["name"] for x in body] if st == 200 else f"HTTP {st}"
++    pc.purge()
++    bad = [x for x in res if not x["ok"]]
++    print(f"smoke: {len(res) - len(bad)}/{len(res)} forks ok (stock rows {want}); instances before the final purge: "
++          + json.dumps({a.split('//')[1]: v for a, v in left.items() if v}), flush=True)
++    if bad:
++        raise SystemExit(f"smoke failed: {bad}")
++
++
++def status(_args) -> None:
++    from dblib import pgcopy as pc
++    for a in pc.all_agents():
++        st, body = pc.http("GET", f"{a}/stats", timeout=30)
++        if st != 200:
++            print(f"{a}: HTTP {st} {body}")
++            continue
++        print(f"{a}: {body['instances']} instances ({body['running']} running), data "
++              f"{body['data_bytes'] / 2**30:.2f} GiB, wal {body['wal_bytes'] / 2**30:.2f} GiB, mem avail "
++              f"{body['mem_available_mb'] / 1024:.1f} GiB, disk free {body['disk_free_gb']:.0f} GB", flush=True)
++
++
++def clock_check(args) -> None:
++    """Offset of every agent's clock from this node's, by the midpoint of a GET /time (median of 5)."""
++    from dblib import pgcopy as pc
++    out = {}
++    for a in pc.all_agents():
++        offs = []
++        for _ in range(5):
++            t0 = time.time()
++            st, body = pc.http("GET", f"{a}/time", timeout=10)
++            t1 = time.time()
++            if st == 200:
++                offs.append(body["t"] - (t0 + t1) / 2)
++        offs.sort()
++        out[a] = {"offset_ms": round(offs[len(offs) // 2] * 1e3, 3) if offs else None}
++        print(f"{a}: {out[a]['offset_ms']} ms", flush=True)
++    if args.out:
++        Path(args.out).write_text(json.dumps(out, indent=2))
++
++
++def main(argv=None) -> None:
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--env", required=True)
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    p = sub.add_parser("seed")
++    p.add_argument("--scale", type=int, required=True)
++    p.add_argument("--shared-buffers", default="1GB")
++    p.add_argument("--out", required=True)
++    for c in ("purge", "smoke", "status"):
++        sub.add_parser(c)
++    p = sub.add_parser("clock-check")
++    p.add_argument("--out")
++    a = ap.parse_args(argv)
++    load_env(a.env)
++    {"seed": seed, "purge": purge, "smoke": smoke, "status": status, "clock-check": clock_check}[a.cmd](a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/setup/pgcopy_node_agent.py b/scripts/setup/pgcopy_node_agent.py
+new file mode 100644
+index 0000000..c11a6ee
+--- /dev/null
++++ b/scripts/setup/pgcopy_node_agent.py
+@@ -0,0 +1,608 @@
++#!/usr/bin/env python3
++"""pgcopy node agent (stdlib only, Python >= 3.10): one per node of a pgcopy deployment (experiment 13), started by
++scripts/setup/pgcopy.py as the systemd unit pgcopy-agent. It runs PostgreSQL instances whose data directories are
++copied from another instance with pg_basebackup (a branch), or initialised (the seed).
++
++  POST   /instances {"name", "parent"?: {"host", "port", "name"?}, "init"?: bool, "start"?: bool (default true),
++                     "shared_buffers"?, "statement_log"?: bool, "parent_role"?: bool}
++         create the instance unless it exists: initdb (init) or pg_basebackup from parent (timed: copy_ms; bytes =
++         size of the copied directory), write postgresql.auto.conf and pg_hba.conf, then (start) postgres and wait
++         until it answers `select 1` (timed: start_ms). Reply {name, host, port, copy_ms, start_ms, bytes, started,
++         running}. A second request for the same name waits for the first and returns its timings, started=false.
++  POST   /instances/<name>/start          start a stopped/copied instance (idempotent)
++  GET    /instances                       list;  GET /instances/<name>  one (404 if unknown)
++  DELETE /instances/<name>                stop (immediate shutdown) and remove
++  DELETE /instances                       every instance but the protected ones (--protect), then stale shm
++  POST   /instances/<name>/sql {"sql", "db"?}   psql as the bench user
++  GET    /stats                           instances, running, data_bytes, wal_bytes, memory, disk free
++  GET    /time                            {"t": time.time()}
++
++Archive (--archive-dir): forks.jsonl (one line per create: parent, t0, t_copied, t_ready, copy_ms, start_ms, bytes),
++failed/ (the log of a failed copy or start), pg/ (an instance's log at delete when statement_log was on).
++
++Addresses: the agent and every instance listen on --host (the node's LAN address) and 127.0.0.1 only, never on all
++interfaces (the nodes' public interfaces face the internet). Copies connect to the parent's LAN address.
++"""
++import argparse
++import json
++import os
++import re
++import shutil
++import signal
++import subprocess
++import threading
++import time
++from concurrent.futures import ThreadPoolExecutor
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from urllib.parse import urlparse
++
++ARGS = None
++LOCK = threading.Lock()
++INSTANCES = {}         # name -> dict(slot, port, dir, log, state, event, proc, copy_ms, start_ms, bytes, ...)
++COPY_SEM = None
++START_SEM = None
++ARCHIVE_LOCK = threading.Lock()
++STATS_CACHE = {"t": 0.0, "v": None}
++PW = "bench"
++USER = "bench"
++
++
++def archive_line(name, obj):
++    with ARCHIVE_LOCK, open(os.path.join(ARGS.archive_dir, name), "a") as f:
++        f.write(json.dumps(obj) + "\n")
++
++
++def pg_env():
++    return dict(os.environ, PGPASSWORD=PW, PGCONNECT_TIMEOUT="10")
++
++
++def binp(name):
++    return os.path.join(ARGS.pg_bin, name)
++
++
++# ---------------------------------------------------------------- instances
++def free_slot():
++    used = {c["slot"] for c in INSTANCES.values()}
++    s = 0
++    while s in used:
++        s += 1
++    return s
++
++
++def dir_bytes(path):
++    total = 0
++    for root, _, files in os.walk(path):
++        for f in files:
++            try:
++                total += os.lstat(os.path.join(root, f)).st_size
++            except OSError:
++                pass
++    return total
++
++
++def write_conf(c, shared_buffers, statement_log, parent_role):
++    """postgresql.auto.conf (the copy brings the parent's: replaced entirely) and pg_hba.conf."""
++    d = c["dir"]
++    lines = [
++        f"port = {c['port']}",
++        f"listen_addresses = '{ARGS.host},127.0.0.1'",
++        "unix_socket_directories = ''",
++        f"shared_buffers = '{shared_buffers}'",
++        "huge_pages = off",
++        "dynamic_shared_memory_type = posix",
++        "max_parallel_workers_per_gather = 0",
++        "logging_collector = off",
++        f"log_min_duration_statement = {0 if statement_log else -1}",
++        "log_line_prefix = '%m [%p] '",
++    ]
++    if parent_role:   # the seed and run roots: every branch copy is a replication connection to them, holding a
++        # temporary replication slot (WAL is kept until each copy has streamed it: without slots, 16 concurrent
++        # copies of one root forced enough segment switches that WAL a slow copy still needed was removed)
++        lines += ["max_wal_senders = 96", "max_replication_slots = 96", "max_connections = 160",
++                  "wal_keep_size = '512MB'"]
++    else:
++        lines += [f"max_wal_senders = {ARGS.host_wal_senders}", f"max_connections = {ARGS.host_max_connections}"]
++    with open(f"{d}/postgresql.auto.conf", "w") as f:
++        f.write("# written by pgcopy_node_agent.py\n" + "\n".join(lines) + "\n")
++    with open(f"{d}/pg_hba.conf", "w") as f:
++        f.write("local all all trust\n"
++                f"host all {USER} 127.0.0.1/32 scram-sha-256\n"
++                f"host all {USER} {ARGS.lan_cidr} scram-sha-256\n"
++                f"host replication {USER} 127.0.0.1/32 scram-sha-256\n"
++                f"host replication {USER} {ARGS.lan_cidr} scram-sha-256\n")
++
++
++def initdb(c):
++    pw = f"{c['dir']}.pw"
++    with open(pw, "w") as f:
++        f.write(PW + "\n")
++    try:
++        r = subprocess.run([binp("initdb"), "-D", c["dir"], "-U", USER, f"--pwfile={pw}", "--auth-local=trust",
++                            "--auth-host=scram-sha-256", "-E", "UTF8", "--locale=C.UTF-8", "--no-sync"],
++                           capture_output=True, text=True, timeout=300)
++    finally:
++        os.unlink(pw)
++    if r.returncode != 0:
++        raise RuntimeError(f"initdb failed: {r.stderr.strip()[-500:]}")
++
++
++def copy_from(c, parent):
++    os.makedirs(os.path.dirname(c["dir"]), exist_ok=True)
++    r = subprocess.run([binp("pg_basebackup"), "-h", parent["host"], "-p", str(parent["port"]), "-U", USER,
++                        "-D", c["dir"], "-Fp", "-X", "stream", "--checkpoint=fast", "--no-sync",
++                        "--no-manifest", "-w"],
++                       capture_output=True, text=True, timeout=ARGS.copy_timeout, env=pg_env())
++    if r.returncode != 0:
++        raise RuntimeError(f"pg_basebackup from {parent['host']}:{parent['port']} failed: "
++                           f"{r.stderr.strip()[-500:]}")
++
++
++def psql(c, sql, timeout=30, db="postgres"):
++    return subprocess.run([binp("psql"), "-h", "127.0.0.1", "-p", str(c["port"]), "-U", USER, "-d", db,
++                           "-XAtq", "-v", "ON_ERROR_STOP=1", "-c", sql],
++                          capture_output=True, text=True, timeout=timeout, env=pg_env())
++
++
++def start_pg(c):
++    """Start postgres on the instance's directory; wait until `select 1` answers (20 ms polls). Returns ms."""
++    logf = open(c["log"], "a")
++    t0 = time.time()
++    c["proc"] = subprocess.Popen([binp("postgres"), "-D", c["dir"]], stdout=logf, stderr=subprocess.STDOUT,
++                                 stdin=subprocess.DEVNULL, start_new_session=True, cwd=c["dir"])
++    logf.close()
++    deadline = t0 + ARGS.start_timeout
++    while time.time() < deadline:
++        if c["proc"].poll() is not None:
++            raise RuntimeError(f"postgres exited with {c['proc'].returncode}; see {c['log']}")
++        try:
++            if psql(c, "select 1", timeout=10).returncode == 0:
++                c["t_ready"] = time.time()
++                c["running"] = True
++                return (c["t_ready"] - t0) * 1000
++        except subprocess.TimeoutExpired:
++            pass
++        time.sleep(0.02)
++    raise TimeoutError(f"instance {c['name']} not ready after {ARGS.start_timeout}s")
++
++
++def kill_by_cwd(root):
++    """SIGKILL this user's processes working under root (Postgres children are their own session leaders)."""
++    root = os.path.realpath(root) + "/"
++    for pid in os.listdir("/proc"):
++        if not pid.isdigit():
++            continue
++        try:
++            if os.stat(f"/proc/{pid}").st_uid != os.getuid():
++                continue
++            cwd = os.readlink(f"/proc/{pid}/cwd")
++        except OSError:
++            continue
++        if (cwd.removesuffix(" (deleted)") + "/").startswith(root):
++            try:
++                os.kill(int(pid), signal.SIGKILL)
++            except ProcessLookupError:
++                pass
++
++
++def stop_pg(c, remove=True):
++    p = c.get("proc")
++    if p is not None and p.poll() is None:
++        try:
++            p.send_signal(signal.SIGQUIT)    # immediate shutdown: the directory is removed anyway
++        except ProcessLookupError:
++            pass
++        try:
++            p.wait(timeout=20)
++        except subprocess.TimeoutExpired:
++            pass
++    if os.path.isdir(c["dir"]):
++        kill_by_cwd(c["dir"])
++    if p is not None:
++        try:
++            p.wait(timeout=10)
++        except subprocess.TimeoutExpired:
++            pass
++    c["running"] = False
++    if remove:
++        if c.get("statement_log") and os.path.exists(c["log"]):
++            keep_log(c, "pg")
++        shutil.rmtree(c["dir"], ignore_errors=True)
++        try:
++            os.unlink(c["log"])
++        except OSError:
++            pass
++
++
++def keep_log(c, sub):
++    if not os.path.exists(c["log"]):
++        return
++    os.makedirs(os.path.join(ARGS.archive_dir, sub), exist_ok=True)
++    try:
++        shutil.copy(c["log"], os.path.join(ARGS.archive_dir, sub, f"{c['name']}_{time.time():.3f}.log"))
++    except OSError:
++        pass
++
++
++def reply_of(c, started):
++    return {"name": c["name"], "host": ARGS.host, "port": c["port"], "copy_ms": c.get("copy_ms"),
++            "start_ms": c.get("start_ms"), "bytes": c.get("bytes"), "started": started,
++            "running": bool(c.get("running")), "state": c["state"], "parent": c.get("parent")}
++
++
++def new_entry(name, body):
++    slot = free_slot()
++    return {"name": name, "slot": slot, "port": ARGS.pg_port_base + slot, "dir": f"{ARGS.instance_root}/{name}",
++            "log": f"{ARGS.instance_root}/{name}.log", "state": "creating", "event": threading.Event(),
++            "proc": None, "running": False, "copy_ms": None, "start_ms": None, "bytes": None, "error": None,
++            "parent": (body.get("parent") or {}).get("name"), "statement_log": bool(body.get("statement_log")),
++            "shared_buffers": body.get("shared_buffers") or ARGS.shared_buffers,
++            "parent_role": bool(body.get("parent_role"))}
++
++
++def ensure_instance(body):
++    name = body["name"]
++    if not re.fullmatch(r"[A-Za-z0-9_]{1,63}", name):
++        raise ValueError(f"bad instance name {name!r}")
++    with LOCK:
++        c = INSTANCES.get(name)
++        owner = c is None
++        if owner:
++            free = disk_free_gb(ARGS.instance_root)
++            if ARGS.disk_guard_gb and free is not None and free < ARGS.disk_guard_gb:
++                raise RuntimeError(f"less than {ARGS.disk_guard_gb} GB free on {ARGS.instance_root}")
++            c = new_entry(name, body)
++            INSTANCES[name] = c
++    if not owner:
++        c["event"].wait(ARGS.copy_timeout + ARGS.start_timeout + 60)
++        if c["state"] == "failed":
++            raise RuntimeError(c["error"] or "instance failed")
++        if body.get("start", True) and not c.get("running"):
++            return start_instance(name)
++        return reply_of(c, False)
++    want_start = body.get("start", True)
++    try:
++        t0 = time.time()
++        if body.get("init"):
++            initdb(c)
++        else:
++            parent = body.get("parent")
++            if not parent:
++                raise ValueError("a copy needs 'parent' {host, port}")
++            with COPY_SEM:
++                t0 = time.time()
++                copy_from(c, parent)
++        t_copied = time.time()
++        c["copy_ms"] = (t_copied - t0) * 1000
++        c["bytes"] = dir_bytes(c["dir"])
++        write_conf(c, c["shared_buffers"], c["statement_log"], c["parent_role"])
++        c["state"] = "copied"
++        if want_start:
++            with START_SEM:
++                c["start_ms"] = start_pg(c)
++            c["state"] = "running"
++        archive_line("forks.jsonl", {"name": name, "parent": c["parent"], "init": bool(body.get("init")),
++                                     "t0": t0, "t_copied": t_copied, "t_ready": c.get("t_ready"),
++                                     "copy_ms": c["copy_ms"], "start_ms": c["start_ms"], "bytes": c["bytes"],
++                                     "slot": c["slot"], "parent_role": c["parent_role"]})
++    except Exception as e:  # noqa: BLE001
++        c["state"] = "failed"
++        c["error"] = str(e)
++        archive_line("failures.jsonl", {"name": name, "t": time.time(), "error": str(e)[:2000]})
++        keep_log(c, "failed")
++        stop_pg(c)
++        with LOCK:
++            INSTANCES.pop(name, None)
++        raise
++    finally:
++        c["event"].set()
++    return reply_of(c, want_start)
++
++
++def start_instance(name):
++    with LOCK:
++        c = INSTANCES.get(name)
++    if c is None:
++        raise KeyError(name)
++    with c.setdefault("start_lock", threading.Lock()):
++        if c.get("running") and c["proc"] is not None and c["proc"].poll() is None:
++            return reply_of(c, False)
++        with START_SEM:
++            c["start_ms"] = start_pg(c)
++        c["state"] = "running"
++        archive_line("starts.jsonl", {"name": name, "t_ready": c.get("t_ready"), "start_ms": c["start_ms"]})
++    return reply_of(c, True)
++
++
++def delete_instance(name):
++    with LOCK:
++        c = INSTANCES.pop(name, None)
++    if c is None:
++        return False
++    stop_pg(c)
++    return True
++
++
++def delete_all():
++    with LOCK:
++        names = [n for n in INSTANCES if n not in ARGS.protect]
++    with ThreadPoolExecutor(64) as ex:
++        list(ex.map(delete_instance, names))
++    clean_root(keep=set(INSTANCES))
++    remove_orphan_shm()
++    if ARGS.fstrim:
++        trim()
++    return len(names)
++
++
++def trim():
++    """sudo fstrim of the instance root's filesystem, so that every point starts with the SSD's freed blocks known
++    to it. Without it the drive (no `discard` mount option) runs out of free blocks after hundreds of GB of copies
++    and deletes, and its writes and fsyncs slow down (experiment 13: a fork's start went from 1.1 s to 3.3 s on the
++    node that took every timed create)."""
++    t0 = time.time()
++    r = subprocess.run(["sudo", "-n", "fstrim", "-v", ARGS.instance_root], capture_output=True, text=True)
++    archive_line("trims.jsonl", {"t0": t0, "seconds": round(time.time() - t0, 2), "rc": r.returncode,
++                                 "out": (r.stdout or r.stderr).strip()[:300]})
++
++
++def clean_root(keep=()):
++    os.makedirs(ARGS.instance_root, exist_ok=True)
++    for f in os.listdir(ARGS.instance_root):
++        base = f[:-4] if f.endswith(".log") else f
++        if base in keep:
++            continue
++        p = os.path.join(ARGS.instance_root, f)
++        if os.path.isdir(p):
++            kill_by_cwd(p)
++            shutil.rmtree(p, ignore_errors=True)
++        else:
++            try:
++                os.unlink(p)
++            except OSError:
++                pass
++
++
++def remove_orphan_shm():
++    """SysV segments of dead postmasters (no process attached) and POSIX DSM segments (/dev/shm/PostgreSQL.*) that no
++    process of this user maps: killed instances leave both behind."""
++    try:
++        out = subprocess.run(["ipcs", "-m"], capture_output=True, text=True).stdout
++        me = os.environ.get("USER") or str(os.getuid())
++        for line in out.splitlines():
++            p = line.split()
++            if len(p) >= 6 and p[1].isdigit() and p[2] in (me, str(os.getuid())) and p[5] == "0":
++                subprocess.run(["ipcrm", "-m", p[1]], capture_output=True)
++    except OSError:
++        pass
++    try:
++        segs = [f for f in os.listdir("/dev/shm") if f.startswith("PostgreSQL.")
++                and os.stat(f"/dev/shm/{f}").st_uid == os.getuid()]
++    except OSError:
++        return
++    if not segs:
++        return
++    used = set()
++    for pid in os.listdir("/proc"):
++        if not pid.isdigit():
++            continue
++        try:
++            if os.stat(f"/proc/{pid}").st_uid != os.getuid():
++                continue
++            with open(f"/proc/{pid}/maps") as f:
++                for line in f:
++                    i = line.find("/dev/shm/PostgreSQL.")
++                    if i >= 0:
++                        used.add(line[i + len("/dev/shm/"):].split()[0])
++            for fd in os.listdir(f"/proc/{pid}/fd"):
++                try:
++                    t = os.readlink(f"/proc/{pid}/fd/{fd}")
++                except OSError:
++                    continue
++                if t.startswith("/dev/shm/PostgreSQL."):
++                    used.add(t[len("/dev/shm/"):])
++        except OSError:
++            continue
++    for f in segs:
++        if f not in used:
++            try:
++                os.unlink(f"/dev/shm/{f}")
++            except OSError:
++                pass
++
++
++def adopt_protected():
++    """At agent start: a protected instance (the seed) whose directory exists is started again on its old slot 0..;
++    everything else under the instance root is removed."""
++    for name in ARGS.protect:
++        d = f"{ARGS.instance_root}/{name}"
++        if not os.path.isfile(f"{d}/PG_VERSION"):
++            continue
++        port = None
++        try:
++            with open(f"{d}/postgresql.auto.conf") as f:
++                m = re.search(r"^port = (\d+)", f.read(), re.M)
++                port = int(m.group(1)) if m else None
++        except OSError:
++            pass
++        slot = (port - ARGS.pg_port_base) if port else free_slot()
++        sb = ARGS.shared_buffers
++        try:
++            with open(f"{d}/postgresql.auto.conf") as f:
++                m = re.search(r"^shared_buffers = '([^']+)'", f.read(), re.M)
++                sb = m.group(1) if m else sb
++        except OSError:
++            pass
++        c = new_entry(name, {"parent_role": True, "shared_buffers": sb})
++        c.update(slot=slot, port=ARGS.pg_port_base + slot, state="copied")
++        write_conf(c, sb, False, True)    # the current parent settings (e.g. replication slots, 6 Nov)
++        c["event"].set()
++        kill_by_cwd(d)
++        try:
++            os.unlink(f"{d}/postmaster.pid")
++        except OSError:
++            pass
++        INSTANCES[name] = c
++        try:
++            c["start_ms"] = start_pg(c)
++            c["state"] = "running"
++            print(f"adopted {name} on port {c['port']} ({c['start_ms']:.0f} ms)", flush=True)
++        except Exception as e:  # noqa: BLE001
++            print(f"could not restart {name}: {e}", flush=True)
++            c["state"] = "failed"
++    clean_root(keep=set(INSTANCES))
++    remove_orphan_shm()
++
++
++# ---------------------------------------------------------------- stats
++def disk_free_gb(path):
++    try:
++        st = os.statvfs(path)
++    except OSError:
++        return None
++    return st.f_bavail * st.f_frsize / 2**30
++
++
++def meminfo():
++    with open("/proc/meminfo") as f:
++        return {l.split(":")[0]: int(l.split()[1]) for l in f}
++
++
++def stats():
++    now = time.time()
++    if STATS_CACHE["v"] is None or now - STATS_CACHE["t"] > 1.0:
++        data = wal = 0
++        with LOCK:
++            dirs = [c["dir"] for c in INSTANCES.values()]
++        for d in dirs:
++            b = dir_bytes(d)
++            w = dir_bytes(f"{d}/pg_wal")
++            data += b - w
++            wal += w
++        STATS_CACHE.update(t=now, v=(data, wal))
++    data, wal = STATS_CACHE["v"]
++    mem = meminfo()
++    with LOCK:
++        n = len(INSTANCES)
++        running = sum(1 for c in INSTANCES.values() if c.get("running"))
++    return {"instances": n, "running": running, "data_bytes": data, "wal_bytes": wal,
++            "mem_available_mb": mem["MemAvailable"] / 1024, "mem_shmem_mb": mem.get("Shmem", 0) / 1024,
++            "disk_free_gb": disk_free_gb(ARGS.instance_root)}
++
++
++# ---------------------------------------------------------------- HTTP
++class Handler(BaseHTTPRequestHandler):
++    protocol_version = "HTTP/1.1"
++    disable_nagle_algorithm = True    # experiment 4: headers and body as separate writes wait for a delayed ACK
++
++    def log_message(self, fmt, *args):
++        pass
++
++    def reply(self, code, obj):
++        data = json.dumps(obj).encode()
++        self.send_response(code)
++        self.send_header("Content-Type", "application/json")
++        self.send_header("Content-Length", str(len(data)))
++        self.end_headers()
++        self.wfile.write(data)
++
++    def body(self):
++        n = int(self.headers.get("Content-Length") or 0)
++        return json.loads(self.rfile.read(n) or b"{}")
++
++    def handle_any(self, method):
++        parts = [p for p in urlparse(self.path).path.split("/") if p]
++        try:
++            if method == "GET" and parts == ["time"]:
++                return self.reply(200, {"t": time.time()})
++            if method == "GET" and parts == ["stats"]:
++                return self.reply(200, stats())
++            if parts[:1] != ["instances"]:
++                return self.reply(404, {"error": f"no route {method} {self.path}"})
++            if method == "GET" and len(parts) == 1:
++                with LOCK:
++                    return self.reply(200, [reply_of(c, False) for c in INSTANCES.values()])
++            if method == "POST" and len(parts) == 1:
++                return self.reply(200, ensure_instance(self.body()))
++            if method == "DELETE" and len(parts) == 1:
++                return self.reply(200, {"deleted": delete_all()})
++            name = parts[1]
++            if method == "GET" and len(parts) == 2:
++                with LOCK:
++                    c = INSTANCES.get(name)
++                if c is None:
++                    return self.reply(404, {"error": f"no instance {name}"})
++                if c["state"] == "creating":
++                    c["event"].wait(ARGS.copy_timeout + ARGS.start_timeout + 60)
++                return self.reply(200, reply_of(c, False))
++            if method == "DELETE" and len(parts) == 2:
++                if name in ARGS.protect:
++                    return self.reply(403, {"error": f"{name} is protected"})
++                return self.reply(200 if delete_instance(name) else 404, {})
++            if method == "POST" and len(parts) == 3 and parts[2] == "start":
++                try:
++                    return self.reply(200, start_instance(name))
++                except KeyError:
++                    return self.reply(404, {"error": f"no instance {name}"})
++            if method == "POST" and len(parts) == 3 and parts[2] == "sql":
++                with LOCK:
++                    c = INSTANCES.get(name)
++                if c is None or not c.get("running"):
++                    return self.reply(404, {"error": "no running instance"})
++                b = self.body()
++                r = psql(c, b["sql"], timeout=7200, db=b.get("db", "postgres"))
++                return self.reply(200 if r.returncode == 0 else 500, {"stdout": r.stdout, "stderr": r.stderr})
++            return self.reply(404, {"error": f"no route {method} {self.path}"})
++        except Exception as e:  # noqa: BLE001
++            return self.reply(500, {"error": str(e)})
++
++    def do_GET(self):
++        self.handle_any("GET")
++
++    def do_POST(self):
++        self.handle_any("POST")
++
++    def do_DELETE(self):
++        self.handle_any("DELETE")
++
++
++class Server(ThreadingHTTPServer):
++    daemon_threads = True
++    request_queue_size = 1024
++
++
++def main():
++    global ARGS, COPY_SEM, START_SEM
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--listen", required=True, help="<LAN ip>:<port> (never 0.0.0.0)")
++    ap.add_argument("--host", required=True, help="this node's LAN address (instances listen on it and 127.0.0.1)")
++    ap.add_argument("--lan-cidr", default="10.0.0.0/8", help="pg_hba: addresses allowed to connect and copy")
++    ap.add_argument("--pg-bin", default="/usr/lib/postgresql/17/bin")
++    ap.add_argument("--instance-root", required=True)
++    ap.add_argument("--archive-dir", required=True)
++    ap.add_argument("--protect", default="seed", help="instance names DELETE /instances keeps (comma list)")
++    ap.add_argument("--shared-buffers", default="40MB")
++    ap.add_argument("--host-max-connections", type=int, default=20)
++    ap.add_argument("--host-wal-senders", type=int, default=8)
++    ap.add_argument("--max-concurrent-copies", type=int, default=16)
++    ap.add_argument("--max-concurrent-starts", type=int, default=32)
++    ap.add_argument("--copy-timeout", type=float, default=600)
++    ap.add_argument("--start-timeout", type=float, default=300)
++    ap.add_argument("--disk-guard-gb", type=float, default=20)
++    ap.add_argument("--pg-port-base", type=int, default=24000)
++    ap.add_argument("--fstrim", action="store_true", help="sudo fstrim the instance root after every purge")
++    ARGS = ap.parse_args()
++    ARGS.protect = set(filter(None, ARGS.protect.split(",")))
++    host, port = ARGS.listen.rsplit(":", 1)
++    if host in ("0.0.0.0", "", "::"):
++        ap.error("--listen must name the LAN address, not all interfaces")
++    COPY_SEM = threading.Semaphore(ARGS.max_concurrent_copies)
++    START_SEM = threading.Semaphore(ARGS.max_concurrent_starts)
++    os.makedirs(ARGS.archive_dir, exist_ok=True)
++    os.makedirs(ARGS.instance_root, exist_ok=True)
++    adopt_protected()
++    print(f"pgcopy agent on {ARGS.listen}: {len(INSTANCES)} instances adopted", flush=True)
++    Server((host, int(port)), Handler).serve_forever()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/setup/topologies/cloudlab_pgcopy.toml b/scripts/setup/topologies/cloudlab_pgcopy.toml
+new file mode 100644
+index 0000000..abd89f2
+--- /dev/null
++++ b/scripts/setup/topologies/cloudlab_pgcopy.toml
+@@ -0,0 +1,153 @@
++# Experiment 13 (pgcopy): 16 xl170 nodes at CloudLab Utah on one LAN (10.10.1.0/24, 25 GbE), re-instantiated 5 Nov 2026
++# (.agent/cloudlab.md; n0-n15 = CloudLab node0-node15, .agent/network-probe-2026-11-05-xl170/nodes.txt).
++# n0 holds the seed instance and every run root; n1-n15 host the branch instances, each with its own benchmark
++# client (co-located). The coordinator (pc20.cloudlab.umass.edu, 51 ms away) is not a node: it reaches the nodes by
++# ssh on their public names only. zone = "utah", not the default z0: the coordinator is a z0 node in the setup
++# scripts, so it must see the nodes' public addresses. Data on the CloudLab blockstore /mydata (LVM on sda4).
++name = "cloudlab_pgcopy"
++state_dir = "/mydata/bench-pgcopy"
++
++[ssh]
++user = "JiyuHu23"
++key = "~/.ssh/dassl_rsa"
++
++[workload]
++max_procs = 20
++
++[pgcopy]
++seed = "n0"
++hosts = ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9", "n10", "n11", "n12", "n13", "n14", "n15"]
++client = "n1"
++pg_version = 17
++
++[pgcopy.workload]
++shared_buffers = "40MB"          # per instance: ~ Neon's 36 MB LFC + its shared_buffers at W = 3
++seed_shared_buffers = "1GB"      # the seed instance while it is loaded (it stays up for the whole experiment)
++
++[nodes.n0]
++host = "hp024.utah.cloudlab.us"
++lan = "10.10.1.1"
++public = "128.110.218.63"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n1]
++host = "hp119.utah.cloudlab.us"
++lan = "10.10.1.2"
++public = "128.110.218.158"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n2]
++host = "hp011.utah.cloudlab.us"
++lan = "10.10.1.3"
++public = "128.110.218.50"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n3]
++host = "hp097.utah.cloudlab.us"
++lan = "10.10.1.4"
++public = "128.110.218.136"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n4]
++host = "hp091.utah.cloudlab.us"
++lan = "10.10.1.5"
++public = "128.110.218.130"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n5]
++host = "hp016.utah.cloudlab.us"
++lan = "10.10.1.6"
++public = "128.110.218.55"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n6]
++host = "hp013.utah.cloudlab.us"
++lan = "10.10.1.7"
++public = "128.110.218.52"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n7]
++host = "hp033.utah.cloudlab.us"
++lan = "10.10.1.8"
++public = "128.110.218.72"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n8]
++host = "hp108.utah.cloudlab.us"
++lan = "10.10.1.9"
++public = "128.110.218.147"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n9]
++host = "hp027.utah.cloudlab.us"
++lan = "10.10.1.10"
++public = "128.110.218.66"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n10]
++host = "hp082.utah.cloudlab.us"
++lan = "10.10.1.11"
++public = "128.110.218.121"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n11]
++host = "hp038.utah.cloudlab.us"
++lan = "10.10.1.12"
++public = "128.110.218.77"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n12]
++host = "hp032.utah.cloudlab.us"
++lan = "10.10.1.13"
++public = "128.110.218.71"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n13]
++host = "hp004.utah.cloudlab.us"
++lan = "10.10.1.14"
++public = "128.110.218.43"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n14]
++host = "hp105.utah.cloudlab.us"
++lan = "10.10.1.15"
++public = "128.110.218.144"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
++
++[nodes.n15]
++host = "hp087.utah.cloudlab.us"
++lan = "10.10.1.16"
++public = "128.110.218.126"
++zone = "utah"
++data_root = "/mydata"
++disk_dev = "sda4"
+diff --git a/tests/test_pgcopy.py b/tests/test_pgcopy.py
+new file mode 100644
+index 0000000..1bfde33
+--- /dev/null
++++ b/tests/test_pgcopy.py
+@@ -0,0 +1,198 @@
++"""pgcopy backend (experiment 13) without a cluster: naming, placement, the agent requests, the multi-client patches
++and the topology's [pgcopy] section."""
++import importlib.util
++import socket
++import sys
++import threading
++import time
++from pathlib import Path
++
++import pytest
++
++from dblib import pgcopy as pc
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "scripts" / "setup"))
++import topo as topo_mod  # noqa: E402
++
++TOPO = ROOT / "scripts/setup/topologies/cloudlab_pgcopy.toml"
++
++
++def _load(name, path):
++    spec = importlib.util.spec_from_file_location(name, path)
++    m = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(m)
++    return m
++
++
++@pytest.fixture
++def env(monkeypatch):
++    for k in ("PGCOPY_LOCAL_AGENT", "PGCOPY_SHARED_BUFFERS", "PGCOPY_INSTANCE_OPTS", "PGCOPY_START_ON_BRANCH"):
++        monkeypatch.delenv(k, raising=False)
++    monkeypatch.setenv("PGCOPY_ROOT_AGENT", "http://root:9100")
++    monkeypatch.setenv("PGCOPY_AGENTS", "http://h1:9100,http://h2:9100,http://h3:9100")
++    monkeypatch.setenv("PGCOPY_RUN_NONCE", "n0nce")
++    monkeypatch.setenv("PGCOPY_RUN_ROOT", "root_abc")
++    return monkeypatch
++
++
++@pytest.fixture
++def sent(env):
++    calls = []
++    insts = {"root_abc": {"name": "root_abc", "host": "10.10.1.1", "port": 24001, "running": True}}
++
++    def fake_http(method, url, body=None, timeout=30):
++        calls.append((method, url, body))
++        if method == "GET" and "/instances/" in url:
++            name = url.rsplit("/", 1)[1]
++            return (200, insts[name]) if name in insts else (404, {"error": "no"})
++        if method == "POST" and url.endswith("/instances"):
++            return 200, {"name": body["name"], "host": "10.10.1.3", "port": 24005, "copy_ms": 210.0,
++                         "start_ms": 95.0, "bytes": 300 << 20, "started": True, "running": True}
++        if method == "DELETE" and url.endswith("/instances"):
++            return 200, {"deleted": 2}
++        return 200, {}
++
++    env.setattr(pc, "http", fake_http)
++    return calls
++
++
++def test_instance_ids_are_deterministic_and_main_is_the_run_root(env):
++    assert pc.instance_id_for("main") == "root_abc"
++    a, b = pc.instance_id_for("setup_branch_7"), pc.instance_id_for("setup_branch_7")
++    assert a == b and len(a) == 32 and int(a, 16) >= 0
++    env.setenv("PGCOPY_RUN_NONCE", "other")
++    assert pc.instance_id_for("setup_branch_7") != a
++
++
++def test_numbered_branches_spread_round_robin_without_a_local_agent(env):
++    agents = pc.agents()
++    got = [pc.agent_for(pc.instance_id_for(f"setup_branch_{i}")) for i in range(1, 7)]
++    assert got == [agents[(i - 1) % 3] for i in range(1, 7)]
++
++
++def test_roots_and_seed_live_on_the_root_agent_and_local_agent_wins(env):
++    assert pc.agent_for("seed") == "http://root:9100"
++    assert pc.agent_for("root_abc") == "http://root:9100"
++    assert pc.agent_for("root_fffeee") == "http://root:9100"     # another node's run root
++    env.setenv("PGCOPY_LOCAL_AGENT", "http://h2:9100")
++    assert pc.agent_for(pc.instance_id_for("setup_branch_1")) == "http://h2:9100"
++    assert pc.connect_host("http://h2:9100", "10.10.1.3") == "127.0.0.1"
++    assert pc.connect_host("http://h3:9100", "10.10.1.250") == "10.10.1.250"
++
++
++def test_create_asks_the_parent_address_then_posts_to_the_branch_agent(sent, env):
++    env.setenv("PGCOPY_LOCAL_AGENT", "http://h2:9100")
++    env.setenv("PGCOPY_SHARED_BUFFERS", "40MB")
++    env.setenv("PGCOPY_INSTANCE_OPTS", '{"statement_log": false}')
++    r = pc.create_instance("x1", "root_abc")
++    assert sent[0][:2] == ("GET", "http://root:9100/instances/root_abc")
++    method, url, body = sent[1]
++    assert (method, url) == ("POST", "http://h2:9100/instances")
++    assert body == {"name": "x1", "init": False, "parent_role": False, "start": True, "shared_buffers": "40MB",
++                    "statement_log": False, "parent": {"host": "10.10.1.1", "port": 24001, "name": "root_abc"}}
++    assert r["agent"] == "http://h2:9100"
++
++
++def test_start_on_branch_off_copies_only(sent, env):
++    env.setenv("PGCOPY_START_ON_BRANCH", "0")
++    pc.create_instance("x2", "root_abc", agent="http://h1:9100")
++    assert sent[-1][2]["start"] is False
++
++
++def test_purge_deletes_on_every_agent_root_first(sent):
++    assert pc.purge(log=lambda *_: None) == 8
++    urls = [u for m, u, _ in sent if m == "DELETE"]
++    assert urls[0] == "http://root:9100/instances" and len(urls) == 4
++
++
++def test_branch_records_the_fork_phases(sent, env):
++    pc.PgCopyToolSuite.OBSERVED.clear()
++    env.setenv("PGCOPY_LOCAL_AGENT", "http://h2:9100")
++    from dblib import result_collector as rc
++    from dblib.db_api import Ref
++    s = pc.PgCopyToolSuite(rc.ResultCollector())
++    s._branch_impl("b1", Ref("main"))
++    assert pc.PgCopyToolSuite.OBSERVED == {"forks": 1, "fork_copy_ms": 210.0, "fork_start_ms": 95.0,
++                                           "fork_bytes": 300 << 20}
++    assert pc.PgCopyToolSuite._INSTANCES[pc.instance_id_for("b1")] == ("127.0.0.1", 24005)
++
++
++def test_main_cannot_be_deleted(env):
++    from dblib import result_collector as rc
++    from dblib.db_api import Ref
++    with pytest.raises(ValueError):
++        pc.PgCopyToolSuite(rc.ResultCollector())._delete_impl(Ref("main"))
++
++
++# ---------------------------------------------------------------- multi-client patches
++def _free_port():
++    s = socket.socket()
++    s.bind(("127.0.0.1", 0))
++    p = s.getsockname()[1]
++    s.close()
++    return p
++
++
++def test_multi_client_setup_run_does_not_purge(env, monkeypatch):
++    patches = _load("fc_patches_pgc", ROOT / "microbench/fast_client/patches.py")
++    patches.SYNC_ADDR, patches.SYNC_KEY = "127.0.0.1:1", "k"
++    import types
++    calls = []
++    mod = types.SimpleNamespace(new_run=lambda db: calls.append(("new_run", db)) or "root_x",
++                                create_run_root=lambda root, log=print: calls.append(("root", root)),
++                                purge=lambda **k: calls.append(("purge",)))
++    patches.patch_pgcopy(mod)
++    assert mod.setup_run("bench", log=lambda *_: None) == "root_x"
++    mod.teardown_run("bench", log=lambda *_: None)
++    assert calls == [("new_run", "bench"), ("root", "root_x")]
++
++
++def test_hold_patch_blocks_the_one_create_until_released():
++    ms = _load("multi_scaling_pgc", ROOT / "scripts/workloads/multi_client/multi_scaling.py")
++    patches = _load("fc_patches_hold", ROOT / "microbench/fast_client/patches.py")
++    port = _free_port()
++    coord = ms.Coordinator(port)
++    coord.expect("h", 10 ** 9)
++    patches.SYNC_ADDR, patches.HOLD_KEY, patches.SYNC_TIMEOUT = f"127.0.0.1:{port}", "h", 30
++    import types
++
++    class Op:
++        def execute(self, context):
++            raise AssertionError("the original create must not run")
++    patches.patch_branch_ops(types.SimpleNamespace(BranchCreateOperation=Op))
++    done = []
++    t = threading.Thread(target=lambda: done.append(Op().execute(None)))
++    t.start()
++    time.sleep(0.3)
++    assert not done and coord.status("h")[2] == 1
++    coord.release("h")
++    t.join(5)
++    assert done == [None]
++
++
++# ---------------------------------------------------------------- topology
++def test_topology_views():
++    t = topo_mod.Topo(TOPO)
++    e3 = t.pgcopy_env("n3")
++    assert e3["PGCOPY_LOCAL_AGENT"] == "http://10.10.1.4:9100"
++    assert e3["PGCOPY_ROOT_AGENT"] == "http://10.10.1.1:9100"
++    assert len(e3["PGCOPY_AGENTS"].split(",")) == 15 and "10.10.1.1:" not in e3["PGCOPY_AGENTS"]
++    assert e3["PGCOPY_SHARED_BUFFERS"] == "40MB"
++    assert e3["DBFORK_REMOTE_CPU"].split(";")[0] == "server=http://10.10.1.4:9010/cpu?set=server"
++    assert "seed=http://10.10.1.1:9010/cpu?set=server" in e3["DBFORK_REMOTE_CPU"]
++    e0 = t.pgcopy_env("n0", seeding=True)
++    assert e0["PGCOPY_LOCAL_AGENT"] == "" and e0["PGCOPY_SHARED_BUFFERS"] == "1GB" and e0["DBFORK_REMOTE_CPU"] == ""
++    v = t.shell_vars("pgcopy")
++    assert (v["RUNNER_BACKEND"], v["SEED_DB"], v["CLIENT_NODE"], v["SERVER_SAME_HOST"]) == ("pgcopy", "bench", "n1", 0)
++    assert v["ENV_FILE"].endswith("/pgcopy.env") and v["SB"] == "40MB"
++    coord = topo_mod.Node("coordinator", {}, t)
++    assert t.node("n5").addr_from(coord) == "128.110.218.55"   # the coordinator sees public addresses
++
++
++def test_seed_cannot_be_a_host(tmp_path):
++    p = tmp_path / "t.toml"
++    p.write_text('state_dir = "/tmp/x"\n[pgcopy]\nseed = "a"\nhosts = ["a", "b"]\n'
++                 '[nodes.a]\nhost = "ha"\nlan = "10.0.0.1"\n[nodes.b]\nhost = "hb"\nlan = "10.0.0.2"\n')
++    with pytest.raises(topo_mod.TopoError):
++        topo_mod.Topo(p)

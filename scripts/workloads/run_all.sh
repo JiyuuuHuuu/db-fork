@@ -7,9 +7,12 @@
 #   scaling_branch   scaling_branch.sh (N = ns_branch, background = the topology's background)
 #   cold_start       cold_start.py (cold_runs x cold_reads point reads on a new branch)
 #
-#   scripts/workloads/run_all.sh --topology T --backend neon|doltgres --outdir DIR \
+#   scripts/workloads/run_all.sh --topology T --backend neon|doltgres|pgcopy --outdir DIR \
 #       [--steps low_contention,scaling_data,scaling_branch,cold_start] [--no-ceiling] [--background READ|MIXED] \
-#       [--smoke] [--dry-run]
+#       [--multi [--single-ns 1,4,16,64,128]] [--smoke] [--dry-run]
+# --multi (pgcopy, experiment 13): scaling_data, its ceiling and scaling_branch run over every host node with
+# scripts/workloads/multi_client/multi_scaling.py (run, run-ceiling, run-branch); scaling_branch also runs as the
+# single-node series (scaling_branch.sh on the client node, --single-ns, results under DIR/single/).
 # Long runs: start it detached on the client node, e.g.
 #   setsid nohup scripts/workloads/run_all.sh ... > DIR/run_all.out 2>&1 < /dev/null &
 # (CloudLab: as a transient systemd unit, systemd-run --user, so that an ssh logout does not end it.)
@@ -19,12 +22,16 @@ parse_args "$@"
 STEPS="low_contention,scaling_data,scaling_branch,cold_start"
 CEIL=(--ceiling)
 BG_ARGS=()
+MULTI=false
+SINGLE_NS="1,4,16,64,128"
 set -- "${REST[@]}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --steps)      STEPS="$2"; shift 2 ;;
         --no-ceiling) CEIL=(); shift ;;
         --background) BG_ARGS=(--background "$2"); shift 2 ;;
+        --multi)      MULTI=true; shift ;;
+        --single-ns)  SINGLE_NS="$2"; shift 2 ;;
         *) die "unknown option $1" ;;
     esac
 done
@@ -65,13 +72,43 @@ step() {  # name cmd...
     note "FAILED $name ($((SECONDS - t0))s, exit $rc, see driver_$name.out)"; return 1
 }
 
-note "=== run_all $BACKEND_ARG: steps=$STEPS smoke=$SMOKE dry=$DRY topology=$TOPO"
+MS=(uv run python "$WL_DIR/multi_client/multi_scaling.py")
+multi_data() {
+    local a=(--backend "$BACKEND_ARG" --topology "$TOPO" --outdir "$OUTDIR")
+    local ns=$NS_ARG; $SMOKE && ns=${ns:-1,4}
+    [[ -n $ns ]] && a+=(--ns "$ns")
+    [[ -n $OPS_ARG ]] && a+=(--ops "${OPS_ARG// /,}")
+    if $DRY; then echo "  \$ ${MS[*]} run ${a[*]}"; else "${MS[@]}" run "${a[@]}" || return 1; fi
+    [[ ${#CEIL[@]} -gt 0 ]] || return 0
+    local c=(--backend "$BACKEND_ARG" --topology "$TOPO" --outdir "$OUTDIR")
+    if $SMOKE; then c+=(--ns 4 --seconds 5); fi
+    [[ -n $OPS_ARG ]] && c+=(--kinds "$(for op in $OPS_ARG; do case $op in READ) echo point ;; RANGE_READ) echo range ;; INSERT) echo insert ;; UPDATE) echo update ;; esac; done | paste -sd,)")
+    if $DRY; then echo "  \$ ${MS[*]} run-ceiling ${c[*]}"; else "${MS[@]}" run-ceiling "${c[@]}"; fi
+}
+multi_branch() {
+    local a=(--backend "$BACKEND_ARG" --topology "$TOPO" --outdir "$OUTDIR")
+    local ns=$NS_ARG; $SMOKE && { ns=${ns:-1,4}; a+=(--creates 10); }
+    [[ -n $ns ]] && a+=(--ns "$ns")
+    [[ ${#BG_ARGS[@]} -gt 0 ]] && a+=("${BG_ARGS[@]}")
+    if $DRY; then echo "  \$ ${MS[*]} run-branch ${a[*]}"; else "${MS[@]}" run-branch "${a[@]}" || return 1; fi
+    local sns=$SINGLE_NS; $SMOKE && sns=1,4
+    local sp=(--topology "$TOPO" --backend "$BACKEND_ARG" --outdir "$OUTDIR/single" --ns "$sns" "${BG_ARGS[@]}")
+    $SMOKE && sp+=(--smoke)
+    $DRY && sp+=(--dry-run)
+    "$WL_DIR/scaling_branch.sh" "${sp[@]}"
+}
+
+note "=== run_all $BACKEND_ARG: steps=$STEPS smoke=$SMOKE dry=$DRY multi=$MULTI topology=$TOPO"
 IFS=',' read -ra L <<< "$STEPS"
 for s in "${L[@]}"; do
     case "$s" in
         low_contention) step "$s" "$WL_DIR/low_contention.sh" "${PASS[@]}" "${OPSP[@]}" || exit 1 ;;
-        scaling_data)   step "$s" "$WL_DIR/scaling_data.sh" "${PASS[@]}" "${NSP[@]}" "${OPSP[@]}" "${CEIL[@]}" || exit 1 ;;
-        scaling_branch) step "$s" "$WL_DIR/scaling_branch.sh" "${PASS[@]}" "${NSP[@]}" "${BG_ARGS[@]}" || exit 1 ;;
+        scaling_data)
+            if $MULTI; then step "$s" multi_data || exit 1
+            else step "$s" "$WL_DIR/scaling_data.sh" "${PASS[@]}" "${NSP[@]}" "${OPSP[@]}" "${CEIL[@]}" || exit 1; fi ;;
+        scaling_branch)
+            if $MULTI; then step "$s" multi_branch || exit 1
+            else step "$s" "$WL_DIR/scaling_branch.sh" "${PASS[@]}" "${NSP[@]}" "${BG_ARGS[@]}" || exit 1; fi ;;
         cold_start)     step "$s" cold_start_sub || exit 1 ;;
         *) note "unknown step $s"; exit 1 ;;
     esac

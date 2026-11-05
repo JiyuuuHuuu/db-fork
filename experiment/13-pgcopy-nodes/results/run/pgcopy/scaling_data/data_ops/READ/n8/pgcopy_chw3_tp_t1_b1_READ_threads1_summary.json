@@ -1,0 +1,123 @@
+{
+  "run_id": "pgcopy_chw3_tp_t1_b1",
+  "backend": "PGCOPY",
+  "operation": "READ",
+  "num_ops": 3000,
+  "num_threads": 1,
+  "num_branches": 1,
+  "execution_mode": "sync",
+  "concurrent_requests": 1,
+  "scale_factor": 1,
+  "intended_ops": 3000,
+  "total_ops": 3000,
+  "failed_ops": 0,
+  "elapsed_time": 1.8759772777557373,
+  "wall_time": 3.508423328399658,
+  "throughput": 1599.1664907524626,
+  "data_ops_count": 3000,
+  "data_ops_time": 1.1953118650062606,
+  "data_throughput": 2509.805254869019,
+  "loaded_branches": 1,
+  "num_processes": 1,
+  "server_cpu_cores": null,
+  "client_cpu_cores": 0.5810251610850914,
+  "remote_cpu": {
+    "server": {
+      "ncpu": 20,
+      "samples": 4,
+      "proc_cores": 0.2683043137819996,
+      "node_cores": 1.0115541663798013,
+      "node_iowait_cores": 0.0046838588076017875,
+      "disk_util": 0.01554295315875569,
+      "disk_reads_per_s": 0.0,
+      "disk_writes_per_s": 3.8857382896881654,
+      "disk_read_bytes_per_s": 0.0,
+      "disk_write_bytes_per_s": 31831.968068807724
+    },
+    "computes": {
+      "ncpu": 20,
+      "samples": 4,
+      "proc_cores": 0.26832298388260967,
+      "node_cores": null,
+      "node_iowait_cores": null,
+      "disk_util": null,
+      "disk_reads_per_s": null,
+      "disk_writes_per_s": null,
+      "disk_read_bytes_per_s": null,
+      "disk_write_bytes_per_s": null
+    },
+    "copy": {
+      "ncpu": 20,
+      "samples": 4,
+      "proc_cores": 0.0,
+      "node_cores": null,
+      "node_iowait_cores": null,
+      "disk_util": null,
+      "disk_reads_per_s": null,
+      "disk_writes_per_s": null,
+      "disk_read_bytes_per_s": null,
+      "disk_write_bytes_per_s": null
+    },
+    "seed": {
+      "ncpu": 20,
+      "samples": 4,
+      "proc_cores": 0.0,
+      "node_cores": 0.12785246027237648,
+      "node_iowait_cores": 0.0,
+      "disk_util": 0.0,
+      "disk_reads_per_s": 0.0,
+      "disk_writes_per_s": 0.0,
+      "disk_read_bytes_per_s": 0.0,
+      "disk_write_bytes_per_s": 0.0
+    }
+  },
+  "background": null,
+  "latency": {
+    "ops": {
+      "n": 3000,
+      "mean": 0.0005135725876571086,
+      "p50": 0.0004765124999721593,
+      "p95": 0.0006683523500214505,
+      "p99": 0.0006812914005422499,
+      "max": 0.0018404129996270058
+    },
+    "statements": {
+      "n": 3000,
+      "mean": 0.00039843728833542023,
+      "p50": 0.00036351449989524554,
+      "p95": 0.000519139299649396,
+      "p99": 0.0005260822394575369,
+      "max": 0.0011852759998873807
+    }
+  },
+  "data_source": {
+    "source": "generated",
+    "scale_factor": 3,
+    "rows": {},
+    "seed_db": "bench",
+    "seed_db_created": false,
+    "seed_sec": 0.0
+  },
+  "support": {
+    "workflow_supported": true,
+    "unsupported_ops": [],
+    "op_status_counts": {
+      "READ": {
+        "ok": 3000,
+        "unsupported": 0,
+        "failed": 0
+      },
+      "EXEC": {
+        "ok": 3000,
+        "unsupported": 0,
+        "failed": 0
+      }
+    }
+  },
+  "backend_observations": {
+    "forks": 1,
+    "fork_copy_ms": 1894.0105438232422,
+    "fork_start_ms": 1041.280746459961,
+    "fork_bytes": 336237094
+  }
+}

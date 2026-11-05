@@ -1,0 +1,73 @@
+{
+  "backend": "pgcopy",
+  "W": 3,
+  "reads": 30000,
+  "pause_s": 30.0,
+  "topology": "cloudlab_pgcopy",
+  "instance_opts": {
+    "statement_log": true
+  },
+  "agent": "http://10.10.1.2:9100",
+  "runs": [
+    {
+      "run": 1,
+      "branch": "cold_1",
+      "instance": "d71d3ab392679ed80ad8151eed0118d9",
+      "agent": "http://10.10.1.2:9100",
+      "host": "127.0.0.1",
+      "t_create_start": 1793884722.0420325,
+      "t_compute_ready": 1793884723.7484696,
+      "t_connected": 1793884723.7698998,
+      "create_ms": 1706.437110900879,
+      "agent_copy_ms": 626.8370151519775,
+      "agent_start_ms": 1068.1500434875488,
+      "copied_bytes": 336212544,
+      "first_connect_ms": 21.430253982543945,
+      "t_reads_start": 1793884723.7699614,
+      "t_reads_end": 1793884731.741252,
+      "reads": 30000,
+      "median_first_100_ms": 0.21820149959239643,
+      "median_last_5000_ms": 0.2637589986989042
+    },
+    {
+      "run": 2,
+      "branch": "cold_2",
+      "instance": "186f2c7f1563ad50169ddb9d1f37ff79",
+      "agent": "http://10.10.1.2:9100",
+      "host": "127.0.0.1",
+      "t_create_start": 1793884762.1999934,
+      "t_compute_ready": 1793884763.901743,
+      "t_connected": 1793884763.9213762,
+      "create_ms": 1701.749563217163,
+      "agent_copy_ms": 619.0245151519775,
+      "agent_start_ms": 1070.594072341919,
+      "copied_bytes": 336212544,
+      "first_connect_ms": 19.63329315185547,
+      "t_reads_start": 1793884763.9214349,
+      "t_reads_end": 1793884771.8118765,
+      "reads": 30000,
+      "median_first_100_ms": 0.21778500013169833,
+      "median_last_5000_ms": 0.26313350281270687
+    },
+    {
+      "run": 3,
+      "branch": "cold_3",
+      "instance": "b656268770e9457bbfd837c6e6922b69",
+      "agent": "http://10.10.1.2:9100",
+      "host": "127.0.0.1",
+      "t_create_start": 1793884802.0263574,
+      "t_compute_ready": 1793884803.7373128,
+      "t_connected": 1793884803.7604358,
+      "create_ms": 1710.9553813934326,
+      "agent_copy_ms": 605.064868927002,
+      "agent_start_ms": 1093.684196472168,
+      "copied_bytes": 336212544,
+      "first_connect_ms": 23.12302589416504,
+      "t_reads_start": 1793884803.7604992,
+      "t_reads_end": 1793884811.4758136,
+      "reads": 30000,
+      "median_first_100_ms": 0.22834100127511192,
+      "median_last_5000_ms": 0.25549449856043793
+    }
+  ]
+}

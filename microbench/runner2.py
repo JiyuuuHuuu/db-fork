@@ -70,6 +70,8 @@ from dblib import terminusdb
 from dblib.terminusdb import TerminusDBToolSuite
 from dblib import neon_local
 from dblib.neon_local import NeonLocalToolSuite
+from dblib import pgcopy
+from dblib.pgcopy import PgCopyToolSuite
 from dblib.db_api import DBToolSuite, Ref
 from dblib import result_collector as rc
 
@@ -213,9 +215,9 @@ class BenchmarkConfig:
         # A seed database to copy from needs the Dolt revision-database naming.
         if (self.source == "generated" and self.generated.seed_db
                 and self._proto.backend not in (tp.Backend.DOLT, tp.Backend.DOLT_MYSQL,
-                                                tp.Backend.NEON_LOCAL)):
-            raise ValueError("database_setup.generated.seed_db is supported on DOLT, DOLT_MYSQL "
-                             "and NEON_LOCAL only")
+                                                tp.Backend.NEON_LOCAL, tp.Backend.PGCOPY)):
+            raise ValueError("database_setup.generated.seed_db is supported on DOLT, DOLT_MYSQL, "
+                             "NEON_LOCAL and PGCOPY only")
 
         # Validate operation is registered
         op_type = op_bench.operation
@@ -431,6 +433,10 @@ def create_db_tools(
         return NeonLocalToolSuite.init_for_bench(
             result_collector, db_name, default_branch, measure_storage
         )
+    if backend == tp.Backend.PGCOPY:
+        return PgCopyToolSuite.init_for_bench(
+            result_collector, db_name, default_branch, measure_storage
+        )
     if backend == tp.Backend.NEON:
         return NeonToolSuite.init_for_bench(
             result_collector,
@@ -592,6 +598,10 @@ class BackendManager:
             # timeline, which already holds the data (see dblib/neon_local.py).
             info.default_branch_name = neon_local.MAIN_BRANCH
 
+        elif backend == tp.Backend.PGCOPY:
+            # The run root ("main") is an instance copied from the seed instance (see dblib/pgcopy.py).
+            info.default_branch_name = pgcopy.MAIN_BRANCH
+
         elif backend == tp.Backend.XATA:
             if require_db_setup:
                 (
@@ -627,6 +637,8 @@ class BackendManager:
             bauplan.setup_database(db_name, sql_dump_path)
         elif require_db_setup and backend == tp.Backend.NEON_LOCAL:
             neon_local.setup_run(db_name)
+        elif require_db_setup and backend == tp.Backend.PGCOPY:
+            pgcopy.setup_run(db_name)
         elif require_db_setup:
             self._create_database(info.default_uri, db_name)
 
@@ -685,6 +697,12 @@ class BackendManager:
                 neon_local.teardown_run(db_name)
             except Exception as e:
                 print(f"Error cleaning up neon_local: {e}")
+        elif self.config.backend == tp.Backend.PGCOPY and db_name:
+            try:
+                # Every instance of the run (the seed instance stays).
+                pgcopy.teardown_run(db_name)
+            except Exception as e:
+                print(f"Error cleaning up pgcopy: {e}")
         elif self.config.backend == tp.Backend.BAUPLAN and db_name:
             try:
                 # The run's branches, tags and S3 files.
@@ -837,6 +855,11 @@ def seed_generated_database(backend: int, backend_info: BackendInfo, db_name: st
     if backend == tp.Backend.NEON_LOCAL and gen.seed_db:
         # The run root is a branch of the seed timeline: the data is there.
         log(f"NEON_LOCAL: run root branched from the seed timeline ({gen.seed_db}); nothing to copy")
+        return {"source": "generated", "scale_factor": schema.scale_factor, "rows": {},
+                "seed_db": gen.seed_db, "seed_db_created": False, "seed_sec": 0.0}
+    if backend == tp.Backend.PGCOPY and gen.seed_db:
+        # The run root is a copy of the seed instance: the data is there.
+        log(f"PGCOPY: run root copied from the seed instance ({gen.seed_db}); nothing to copy")
         return {"source": "generated", "scale_factor": schema.scale_factor, "rows": {},
                 "seed_db": gen.seed_db, "seed_db_created": False, "seed_sec": 0.0}
     seeded_now = False
@@ -3346,6 +3369,7 @@ class ResultManager:
         suite_class = {
             tp.Backend.CHRONOS: ChronosToolSuite,
             tp.Backend.TERMINUSDB: TerminusDBToolSuite,
+            tp.Backend.PGCOPY: PgCopyToolSuite,
         }.get(self.config.backend)
         observed = getattr(suite_class, "OBSERVED", None)
         if observed:

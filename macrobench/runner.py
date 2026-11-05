@@ -153,6 +153,7 @@ def _capabilities_for(backend) -> dict:
     from dblib.xata import XataToolSuite
     from dblib.file_copy import FileCopyToolSuite
     from dblib.chronos import ChronosToolSuite
+    from dblib.pgcopy import PgCopyToolSuite
 
     table = {
         tp.Backend.DOLT: DoltToolSuite,
@@ -164,6 +165,7 @@ def _capabilities_for(backend) -> dict:
         tp.Backend.XATA: XataToolSuite,
         tp.Backend.FILE_COPY: FileCopyToolSuite,
         tp.Backend.CHRONOS: ChronosToolSuite,
+        tp.Backend.PGCOPY: PgCopyToolSuite,
     }
     cls = table.get(backend)
     return cls.capabilities() if cls else {}
@@ -179,6 +181,7 @@ def _implementation_for(backend) -> dict:
     from dblib.xata import XataToolSuite
     from dblib.file_copy import FileCopyToolSuite
     from dblib.chronos import ChronosToolSuite
+    from dblib.pgcopy import PgCopyToolSuite
 
     table = {
         tp.Backend.DOLT: DoltToolSuite,
@@ -190,6 +193,7 @@ def _implementation_for(backend) -> dict:
         tp.Backend.XATA: XataToolSuite,
         tp.Backend.FILE_COPY: FileCopyToolSuite,
         tp.Backend.CHRONOS: ChronosToolSuite,
+        tp.Backend.PGCOPY: PgCopyToolSuite,
     }
     cls = table.get(backend)
     if not cls:

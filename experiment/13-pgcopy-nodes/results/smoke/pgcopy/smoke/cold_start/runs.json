@@ -1,0 +1,33 @@
+{
+  "backend": "pgcopy",
+  "W": 3,
+  "reads": 3000,
+  "pause_s": 5.0,
+  "topology": "cloudlab_pgcopy",
+  "instance_opts": {
+    "statement_log": true
+  },
+  "agent": "http://10.10.1.2:9100",
+  "runs": [
+    {
+      "run": 1,
+      "branch": "cold_1",
+      "instance": "6af97691d474685e0d94087dc94bb456",
+      "agent": "http://10.10.1.2:9100",
+      "host": "127.0.0.1",
+      "t_create_start": 1793870424.6172137,
+      "t_compute_ready": 1793870426.2318394,
+      "t_connected": 1793870426.2501466,
+      "create_ms": 1614.6256923675537,
+      "agent_copy_ms": 576.3328075408936,
+      "agent_start_ms": 1026.738166809082,
+      "copied_bytes": 336212517,
+      "first_connect_ms": 18.307209014892578,
+      "t_reads_start": 1793870426.2502382,
+      "t_reads_end": 1793870426.8084757,
+      "reads": 3000,
+      "median_first_100_ms": 0.15981450042090728,
+      "median_last_10pct_ms": 0.18573550005385187
+    }
+  ]
+}

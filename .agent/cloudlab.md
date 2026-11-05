@@ -1,29 +1,81 @@
 # CloudLab specs
 
 ```
-ssh JiyuHu23@hp155.utah.cloudlab.us
-ssh JiyuHu23@hp130.utah.cloudlab.us
-ssh JiyuHu23@hp159.utah.cloudlab.us
-ssh JiyuHu23@hp141.utah.cloudlab.us
-ssh JiyuHu23@hp132.utah.cloudlab.us
-ssh JiyuHu23@hp139.utah.cloudlab.us
-ssh JiyuHu23@hp125.utah.cloudlab.us
-ssh JiyuHu23@hp158.utah.cloudlab.us
-ssh JiyuHu23@hp140.utah.cloudlab.us
-ssh JiyuHu23@hp177.utah.cloudlab.us
-ssh JiyuHu23@hp186.utah.cloudlab.us
-ssh JiyuHu23@hp188.utah.cloudlab.us
-ssh JiyuHu23@hp192.utah.cloudlab.us
-ssh JiyuHu23@hp187.utah.cloudlab.us
-ssh JiyuHu23@hp181.utah.cloudlab.us
-ssh JiyuHu23@hp171.utah.cloudlab.us
+ssh JiyuHu23@hp024.utah.cloudlab.us
+ssh JiyuHu23@hp119.utah.cloudlab.us
+ssh JiyuHu23@hp011.utah.cloudlab.us
+ssh JiyuHu23@hp097.utah.cloudlab.us
+ssh JiyuHu23@hp091.utah.cloudlab.us
+ssh JiyuHu23@hp016.utah.cloudlab.us
+ssh JiyuHu23@hp013.utah.cloudlab.us
+ssh JiyuHu23@hp033.utah.cloudlab.us
+ssh JiyuHu23@hp108.utah.cloudlab.us
+ssh JiyuHu23@hp027.utah.cloudlab.us
+ssh JiyuHu23@hp082.utah.cloudlab.us
+ssh JiyuHu23@hp038.utah.cloudlab.us
+ssh JiyuHu23@hp032.utah.cloudlab.us
+ssh JiyuHu23@hp004.utah.cloudlab.us
+ssh JiyuHu23@hp105.utah.cloudlab.us
+ssh JiyuHu23@hp087.utah.cloudlab.us
 ```
 
-## Current cluster (from 2 Nov 2026): 16 xl170 at Utah, two zones
+## Current cluster (from 5 Nov 2026): 16 xl170 at Utah, one LAN
+
+Experiment `branchbench` (re-instantiated 5 Nov 2026), project `rasl-PG0`, CloudLab Utah. Login list above
+(`ssh -i ~/.ssh/dassl_rsa JiyuHu23@hpNNN.utah.cloudlab.us`); passwordless sudo. Nodes answer as
+`nodeN.branchbench.rasl-PG0.utah.cloudlab.us`. Replaces the 2 Nov two-zone cluster below (those hosts are gone).
+
+| Node | Host | LAN IP (25 GbE, `ens1f1np1`) | Public IP (`eno49np0`) |
+|---|---|---|---|
+| node0 | `hp024` | 10.10.1.1 | 128.110.218.63 |
+| node1 | `hp119` | 10.10.1.2 | 128.110.218.158 |
+| node2 | `hp011` | 10.10.1.3 | 128.110.218.50 |
+| node3 | `hp097` | 10.10.1.4 | 128.110.218.136 |
+| node4 | `hp091` | 10.10.1.5 | 128.110.218.130 |
+| node5 | `hp016` | 10.10.1.6 | 128.110.218.55 |
+| node6 | `hp013` | 10.10.1.7 | 128.110.218.52 |
+| node7 | `hp033` | 10.10.1.8 | 128.110.218.72 |
+| node8 | `hp108` | 10.10.1.9 | 128.110.218.147 |
+| node9 | `hp027` | 10.10.1.10 | 128.110.218.66 |
+| node10 | `hp082` | 10.10.1.11 | 128.110.218.121 |
+| node11 | `hp038` | 10.10.1.12 | 128.110.218.77 |
+| node12 | `hp032` | 10.10.1.13 | 128.110.218.71 |
+| node13 | `hp004` | 10.10.1.14 | 128.110.218.43 |
+| node14 | `hp105` | 10.10.1.15 | 128.110.218.144 |
+| node15 | `hp087` | 10.10.1.16 | 128.110.218.126 |
+
+- All 16 identical (checked 5 Nov): 1x Xeon E5-2640 v4 (10 cores / 20 threads, 1 NUMA node), 62 GiB usable,
+  Ubuntu 22.04.2, kernel 5.15.0-198; RDMA devices `mlx5_0`-`mlx5_3` (ConnectX-4 Lx).
+- **One LAN** `10.10.1.0/24` spanning all 16 nodes (no second subnet this time); ping node0 to the others
+  0.15-0.21 ms. No netem / emulated AZs configured.
+- Probe 5 Nov (`network-probe-2026-11-05-xl170/`, from pc20): ping 0.07-0.15 ms, iperf3 13 Gbit/s one stream / 23.3
+  with 4, n0 -> 15 nodes 23.9 Gbit/s total. Switches {n0 n2 n5 n6 n7 n9 n11 n12 n13} and {n1 n3 n4 n8 n10 n14 n15}
+  (+0.6 us RDMA across). `/mydata` ~350 MB/s write, ~365 MB/s read, 46k 8 KB random-read IOPS.
+- Coordinator for experiment 13: pc20.cloudlab.umass.edu (UMass, 51 ms to Utah, public IPs only).
+- Disk: CloudLab blockstore (LVM `emulab-nodeN--bs`, 368 GB ext4) mounted at **`/mydata`** on every node, owned by
+  JiyuHu23. Put data there (no `/mnt/ssd` on this cluster).
+- Set up on all 16 on 5 Nov: rdma-core, ibverbs-utils, perftest, iperf3, fio, numactl installed;
+  `RemoveIPC=no` in `/etc/systemd/logind.conf`. No repo checkouts yet.
+
+### Experiment 13 layout (pgcopy, from 5 Nov 2026)
+
+Set up by `scripts/setup/pgcopy.py scripts/setup/topologies/cloudlab_pgcopy.toml` from the coordinator pc20 (nodes
+n0-n15 = node0-node15). Every node: PGDG PostgreSQL 17.11 (no default cluster), units `pgcopy-agent` (port 9100) and
+`dbfork-cpu-agent` (9010), both bound to the node's 10.10.1.x address only; `kernel.shmmni = 32768`; files under
+`/mydata/pgcopy/{svc,instances,archive}`, results under `/mydata/exp13`; cluster-internal ssh key
+`~/.ssh/cluster_ed25519` (+ `~/.ssh/config` for 10.10.1.*). n0 holds the seed instance (`seed`, port 24000, W=3),
+n1-n15 are hosts (n1 also runs the drivers). **Trim the SSDs** (`sudo fstrim /mydata`): without it they slowed after a
+few hundred GB of copies; the agents now trim after every purge. n4 (hp091) is the slowest node under load.
+
+State after experiment 13 (5 Nov 2026, 13:30 UTC): agents running, only `seed` left (on n0); `/mydata/exp13` on every
+node holds that node's results (the coordinator has all of them under `/mydata/exp13`). Cleanup:
+`pgcopy.py TOPO stop`, `wipe --yes`.
+
+## Previous cluster (2-5 Nov 2026): 16 xl170 at Utah, two zones
 
 Experiment `branchbench`, project `rasl-PG0`, CloudLab Utah. Login list above (`ssh -i ~/.ssh/dassl_rsa
 JiyuHu23@hpNNN.utah.cloudlab.us`); passwordless sudo. Details, raw data and scripts:
-`network-probe-2026-11-02-xl170/` (README there). Sessions on this cluster run from hp155 (= a0).
+`network-probe-2026-11-02-xl170/` (README there). Sessions on this cluster ran from hp155 (= a0). Released; hostnames no longer ours.
 
 | Nodes | Hosts | LAN (25 GbE, `ens1f1np1`, `mlx5_3`) | Public (10 GbE, `eno49np0`, `mlx5_0`) |
 |---|---|---|---|

@@ -17,6 +17,11 @@ connection to the database (timed: first_connect_ms) and SELECT dolt_checkout('c
 checkout_ms; dblib/dolt.py switches branches the same way), then the same reads. Branches and the database are
 dropped at the end.
 
+pgcopy (experiment 13): a new instance copied from the run root onto this node's agent (PGCOPY_LOCAL_AGENT) and
+started (timed together: create_ms; the agent's split: copy_ms, start_ms, bytes), the first psycopg2 connection on
+127.0.0.1 (first_connect_ms), the reads, then the instance is deleted. Its 40 MB shared_buffers start empty; the OS
+page cache holds the files the copy just wrote (warm), which the report notes.
+
 Reads: SELECT * FROM stock WHERE s_w_id = %s AND s_i_id = %s with w uniform in [1, W], i in [1, 100000],
 random.Random(1000 + k) (the runner's READ; keys are dense, no key scan).
 
@@ -56,7 +61,8 @@ def workload_env(topology: str, backend: str, dry: bool = False) -> dict:
     kept). Call before importing dblib (dblib/dolt.py reads DOLT_* at import)."""
     v = topo_mod.Topo(topology).shell_vars(backend)
     for k in list(os.environ):
-        if k.startswith("NEON_LOCAL_") or (k.startswith("DBFORK_") and k != "DBFORK_SERVER_PID") or k in CLEARED:
+        if (k.startswith("NEON_LOCAL_") or k.startswith("PGCOPY_") or (k.startswith("DBFORK_") and k != "DBFORK_SERVER_PID")
+                or k in CLEARED):
             del os.environ[k]
     env_file = Path(v["ENV_FILE"])
     if env_file.exists():
@@ -174,6 +180,31 @@ def neon_run(k, args, W, out):
     return finish(rows, k, out, meta)
 
 
+def pgcopy_run(k, args, W, out):
+    import psycopg2
+    from dblib import pgcopy as pc
+    name = f"cold_{k}"
+    iid = pc.instance_id_for(name)
+    t_create0 = time.time()
+    r = pc.create_instance(iid, pc.instance_id_for(pc.MAIN_BRANCH), agent=pc.local_agent() or None, start=True)
+    t_ready = time.time()
+    host = pc.connect_host(r["agent"], r["host"])
+    conn = psycopg2.connect(host=host, port=r["port"], dbname=os.environ.get("PGCOPY_DB", "bench"),
+                            user=os.environ.get("PGCOPY_PG_USER", "bench"),
+                            password=os.environ.get("PGCOPY_PG_PASSWORD", ""), connect_timeout=60)
+    conn.autocommit = True
+    t_conn = time.time()
+    rows = reads(conn, k, args.reads, W, "pgcopy")
+    conn.close()
+    pc.delete_instance(iid, r["agent"])
+    meta = {"run": k, "branch": name, "instance": iid, "agent": r["agent"], "host": host,
+            "t_create_start": t_create0, "t_compute_ready": t_ready, "t_connected": t_conn,
+            "create_ms": (t_ready - t_create0) * 1e3, "agent_copy_ms": r.get("copy_ms"),
+            "agent_start_ms": r.get("start_ms"), "copied_bytes": r.get("bytes"),
+            "first_connect_ms": (t_conn - t_ready) * 1e3}
+    return finish(rows, k, out, meta)
+
+
 def dolt_run(k, args, W, out, admin, db):
     import psycopg2
     name = f"cold_{k}"
@@ -200,7 +231,7 @@ def dolt_run(k, args, W, out, admin, db):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--topology", required=True)
-    ap.add_argument("--backend", required=True, choices=["neon", "doltgres"])
+    ap.add_argument("--backend", required=True, choices=["neon", "doltgres", "pgcopy"])
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--runs", type=int, help="default: the topology's cold_runs (smoke: 1)")
     ap.add_argument("--reads", type=int, help="default: the topology's cold_reads (smoke: 3000)")
@@ -220,6 +251,10 @@ def main():
         agents = [a.strip() for a in os.environ.get("NEON_LOCAL_AGENTS", "").split(",") if a.strip()]
         plan = {"compute_opts": opts, "agent": agents[0] if agents else None,
                 "shared_buffers": os.environ.get("NEON_LOCAL_SHARED_BUFFERS")}
+    elif args.backend == "pgcopy":
+        opts = {"statement_log": True}
+        plan = {"instance_opts": opts, "agent": os.environ.get("PGCOPY_LOCAL_AGENT"),
+                "shared_buffers": os.environ.get("PGCOPY_SHARED_BUFFERS")}
     else:
         opts = {}
         plan = {"seed_db": v["SEED_DB"], "database": "cold_start",
@@ -237,7 +272,19 @@ def main():
             return
     metas = []
     common = {"backend": args.backend, "W": W, "reads": args.reads, "pause_s": args.pause, "topology": v["TOPO_NAME"]}
-    if args.backend == "neon":
+    if args.backend == "pgcopy":
+        os.environ["PGCOPY_INSTANCE_OPTS"] = json.dumps(opts)
+        from dblib import pgcopy as pc
+        pc.setup_run("cold")
+        try:
+            for k in range(1, args.runs + 1):
+                metas.append(pgcopy_run(k, args, W, out))
+                runs_json.write_text(json.dumps({**common, "instance_opts": opts, "agent": plan["agent"],
+                                                 "runs": metas}, indent=2))
+                time.sleep(args.pause)
+        finally:
+            pc.teardown_run("cold")
+    elif args.backend == "neon":
         os.environ["NEON_LOCAL_COMPUTE_OPTS"] = json.dumps(opts)
         if not plan["agent"]:
             raise SystemExit("NEON_LOCAL_AGENTS is empty")

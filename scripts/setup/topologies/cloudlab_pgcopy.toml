@@ -1,0 +1,153 @@
+# Experiment 13 (pgcopy): 16 xl170 nodes at CloudLab Utah on one LAN (10.10.1.0/24, 25 GbE), re-instantiated 5 Nov 2026
+# (.agent/cloudlab.md; n0-n15 = CloudLab node0-node15, .agent/network-probe-2026-11-05-xl170/nodes.txt).
+# n0 holds the seed instance and every run root; n1-n15 host the branch instances, each with its own benchmark
+# client (co-located). The coordinator (pc20.cloudlab.umass.edu, 51 ms away) is not a node: it reaches the nodes by
+# ssh on their public names only. zone = "utah", not the default z0: the coordinator is a z0 node in the setup
+# scripts, so it must see the nodes' public addresses. Data on the CloudLab blockstore /mydata (LVM on sda4).
+name = "cloudlab_pgcopy"
+state_dir = "/mydata/bench-pgcopy"
+
+[ssh]
+user = "JiyuHu23"
+key = "~/.ssh/dassl_rsa"
+
+[workload]
+max_procs = 20
+
+[pgcopy]
+seed = "n0"
+hosts = ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9", "n10", "n11", "n12", "n13", "n14", "n15"]
+client = "n1"
+pg_version = 17
+
+[pgcopy.workload]
+shared_buffers = "40MB"          # per instance: ~ Neon's 36 MB LFC + its shared_buffers at W = 3
+seed_shared_buffers = "1GB"      # the seed instance while it is loaded (it stays up for the whole experiment)
+
+[nodes.n0]
+host = "hp024.utah.cloudlab.us"
+lan = "10.10.1.1"
+public = "128.110.218.63"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n1]
+host = "hp119.utah.cloudlab.us"
+lan = "10.10.1.2"
+public = "128.110.218.158"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n2]
+host = "hp011.utah.cloudlab.us"
+lan = "10.10.1.3"
+public = "128.110.218.50"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n3]
+host = "hp097.utah.cloudlab.us"
+lan = "10.10.1.4"
+public = "128.110.218.136"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n4]
+host = "hp091.utah.cloudlab.us"
+lan = "10.10.1.5"
+public = "128.110.218.130"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n5]
+host = "hp016.utah.cloudlab.us"
+lan = "10.10.1.6"
+public = "128.110.218.55"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n6]
+host = "hp013.utah.cloudlab.us"
+lan = "10.10.1.7"
+public = "128.110.218.52"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n7]
+host = "hp033.utah.cloudlab.us"
+lan = "10.10.1.8"
+public = "128.110.218.72"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n8]
+host = "hp108.utah.cloudlab.us"
+lan = "10.10.1.9"
+public = "128.110.218.147"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n9]
+host = "hp027.utah.cloudlab.us"
+lan = "10.10.1.10"
+public = "128.110.218.66"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n10]
+host = "hp082.utah.cloudlab.us"
+lan = "10.10.1.11"
+public = "128.110.218.121"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n11]
+host = "hp038.utah.cloudlab.us"
+lan = "10.10.1.12"
+public = "128.110.218.77"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n12]
+host = "hp032.utah.cloudlab.us"
+lan = "10.10.1.13"
+public = "128.110.218.71"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n13]
+host = "hp004.utah.cloudlab.us"
+lan = "10.10.1.14"
+public = "128.110.218.43"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n14]
+host = "hp105.utah.cloudlab.us"
+lan = "10.10.1.15"
+public = "128.110.218.144"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"
+
+[nodes.n15]
+host = "hp087.utah.cloudlab.us"
+lan = "10.10.1.16"
+public = "128.110.218.126"
+zone = "utah"
+data_root = "/mydata"
+disk_dev = "sda4"

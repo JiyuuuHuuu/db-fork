@@ -6,7 +6,7 @@
 # min(N + 1, MAX_PROCS) client processes. Neon: the default cache filled on every busy branch before its client
 # starts, statement logging off.
 #
-#   scripts/workloads/scaling_branch.sh --topology T --backend neon|doltgres --outdir DIR \
+#   scripts/workloads/scaling_branch.sh --topology T --backend neon|doltgres|pgcopy --outdir DIR \
 #       [--ns 1,4,...] [--background MIXED|READ] [--smoke] [--dry-run]
 # Results: DIR/<backend>/scaling_branch/branch_create/<background, lower case>/
 {
@@ -30,8 +30,12 @@ RUN_ENV=()
 if [[ $BACKEND == neon ]]; then
     [[ ${NEON_LOCAL_PS_OPTS:-} == *pageservers* ]] && warn "the tenant is sharded (NEON_LOCAL_PS_OPTS); experiment 5 created branches on the unsharded tenant"
     export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts false true)"
-    RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
 fi
+[[ $BACKEND == pgcopy ]] && export PGCOPY_INSTANCE_OPTS="$(pgcopy_opts false)"
+prewarm_backend && RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
+# pgcopy (experiment 13): the client side as in its multi-node series (microbench/fast_client), background rows
+# sampled 1/20 (the runner holds every row in memory: 100+ fast background clients for minutes exhaust a node)
+[[ $BACKEND == pgcopy ]] && RUN_ENV+=(BENCH_FAST_CLIENT=1 "PYTHONPATH=$REPO/microbench/fast_client" BENCH_BG_SAMPLE=20)
 bg=${BG,,}
 DIR="$OUTROOT/branch_create/$bg"
 
@@ -44,7 +48,7 @@ one() {  # n
         --background-op "$BG" "${COMMON[@]}" --output-dir "$DIR"
 }
 
-wl_start "ns=$NS background=$BG creates=$CREATES connect_every=$CONNECT_EVERY opts=${NEON_LOCAL_COMPUTE_OPTS:-}"
+wl_start "ns=$NS background=$BG creates=$CREATES connect_every=$CONNECT_EVERY opts=${NEON_LOCAL_COMPUTE_OPTS:-${PGCOPY_INSTANCE_OPTS:-}}"
 IFS=',' read -ra NLIST <<< "$NS"
 for n in "${NLIST[@]}"; do
     if is_done "create_${bg}_n${n}"; then log "SKIP  create_${bg}_n${n} (done before)"; continue; fi

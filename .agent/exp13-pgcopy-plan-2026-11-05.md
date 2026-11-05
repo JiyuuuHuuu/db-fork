@@ -27,9 +27,17 @@ Decisions taken with the user (5 Nov 2026):
   driver); low contention and cold start run on one host. Note: in a shared-nothing system busy branches on other
   nodes cannot slow a create on node 1, so the spread curve is expected flat; that is the finding. A cheap single-node
   variant (`--single-node`, N ≤ 128 on one host) shows the contended case and is run as a secondary series.
-- **Cluster**: the user re-instantiates CloudLab as one LAN (no zones, no netem) and runs the coordinator on a node
-  outside the cluster. All 16 cluster nodes are available: 1 seed/root node + 15 hosts (the host list is a topology
-  parameter; cut it to 7 to match experiment 12's per-node compute density if wanted).
+- **Cluster** (re-instantiated 5 Nov, `.agent/cloudlab.md`): 16 xl170 on one LAN `10.10.1.0/24`, no zones, no netem.
+  n0 = seed/root node, **n1-n15 = 15 hosts** (user, 5 Nov: 15, or 16 if placement permits). 16 does not: n0 serves
+  every copy, and branches placed on n0 would be copied from n0 to n0 (no network), breaking "every fork is a network
+  copy". The host list stays a topology parameter.
+- **Coordinator outside the cluster**: `pc20.cloudlab.umass.edu` (40 cores, 251 GB, Ubuntu 22.04 / 5.15.0-198 like
+  the nodes, 715 GB on `/mydata`). It reaches the nodes only by ssh on their public addresses (51 ms RTT); the LAN
+  addresses are unreachable from it. Rule: **nothing timed or chatty runs on the coordinator**. It only drives setup
+  over ssh and pulls results. Seeding, purges, smoke and the drivers run on cluster nodes (see §4, §5).
+- **Experiment 12's data and scripts are gone** (they were only on the released hp155/b0; git keeps their `.md` and
+  PNGs). The user will re-collect them later. Until then the report shows pgcopy alone. Its summaries keep experiment
+  12's file layout, so the Doltgres / Neon local / Neon TCP / RDMA reference series can be added once that data exists.
 - Postgres 17 (PGDG packages), the same major version as Neon's computes.
 - After approval, export this plan as `experiment/13-pgcopy-nodes/plan.md`.
 
@@ -37,18 +45,19 @@ Out of scope: Neon-only phases of exp 12 (2 pageservers / 2 safekeeper sets, RDM
 (unsupported, as for `neon_local`). Optional follow-ups, not in the main run: a larger seed (`seed --scale 30`,
 ~3 GB) for create/cold-start only, to give the copy-size axis; a copy-with-fsync variant (no `--no-sync`).
 
-## Validity of the experiment (checked 5 Nov on the live cluster)
+## Validity of the experiment (re-checked 5 Nov on the new cluster)
 
 | Concern | Finding |
 |---|---|
-| Disk | Seed `bench` DB = 296 MB at W=3 (`experiment/12-.../logs/w3_seed.log`); a copied instance ≈ 0.3 GB + 1–2 WAL segments (16 MB) ≈ 0.35 GB. N = 1024 → ≈ 360 GB total; over 15 hosts ≈ 24 GB/host, over 7 ≈ 52 GB/host; `/mnt/ssd` has ≈ 350 GB free on every node. Run roots on the seed node: one per runner process per point (≈ 0.35 GB each). The agent refuses a copy below `--disk-guard-gb 20`. |
-| Memory | ≤ 150 instances/host (7 hosts, N=1024): with 40 MB buffers and `max_connections=20`, ≈ 60–80 MB PSS per instance ≈ 9–12 GB of 62 GB; page cache holds the rest. `mem_guard_gb` stays 4. |
-| IPC / limits | ≈ 7 processes per instance → ≈ 1,000 per host. One SysV segment per postmaster → `kernel.shmmni=32768`; POSIX DSM segments in `/dev/shm` are swept at agent start and on purge (exp 12 left 7,600 stale ones); `RemoveIPC=no`, `LimitNOFILE=1048576` (all already in `neon.py prepare` / `nodes.systemd_unit`, reused). PG17 on Linux uses POSIX unnamed semaphores. `huge_pages=off`, `dynamic_shared_memory_type=posix`, parallel query off. Ports `24000+slot` (Neon's agent uses 20000+). |
-| Network | One LAN at 25 GbE (measured 13–15 Gbit/s single stream; 0.07–0.12 ms ping). A 0.3 GB copy ≈ 0.15–0.4 s on the wire; a timed fork should land at a few hundred ms, the same order as a Neon compute start (207–356 ms in exp 12). **No netem**: a fresh instantiation has none; if the current nodes are kept, run `.agent/network-probe-2026-11-02-xl170/scripts/az_netem.sh remove` and capture `status` into `logs/` before any run. Single zone → every address is a LAN address. |
-| Seed-node load | Every fork reads from a run root on the seed node. `--checkpoint=fast` = one immediate checkpoint per request, coalesced by the checkpointer (a batch of 64 setup forks costs ~2 checkpoints on an idle 40 MB-buffer parent). Parents need `max_wal_senders=96`, `max_connections=160`, `wal_keep_size=512MB`, role `bench` with `REPLICATION`, and a `host replication` pg_hba line. Per host, concurrent copies are throttled to 16 (SATA SSD write bound: 64 × 0.3 GB would take ≈ 40 s). Timed forks happen one at a time per creator. |
+| Disk | Seed `bench` DB = 296 MB at W=3 (experiment 12's seed; its log is gone, `pgcopy_seed.json` re-measures it); a copied instance ≈ 0.3 GB + 1–2 WAL segments (16 MB) ≈ 0.35 GB. N = 1024 → ≈ 360 GB total; over 15 hosts ≈ 24 GB/host; `/mydata` (CloudLab blockstore, LVM on the SSD's `sda4`, ext4, 368 GB) has 350 GB free on every node. There is no `/mnt/ssd` on this cluster, and root (`sda3`) is 63 GB. Run roots on the seed node: `BackendManager.setup` calls `setup_run` once per runner invocation, so one root per client node per point: ≤ 15 × 0.35 GB ≈ 5 GB. The agent refuses a copy below `--disk-guard-gb 20`. Coordinator results: `/mydata/exp13` on pc20. |
+| Memory | ≤ 69 instances/host (15 hosts, N=1024; ≤ 150 if cut to 7): with 40 MB buffers and `max_connections=20`, ≈ 60–80 MB PSS per instance ≈ 4–6 GB of 62 GB (9–12 GB at 7 hosts); page cache holds the rest. `mem_guard_gb` stays 4. |
+| IPC / limits | ≈ 7 processes per instance → ≈ 1,000 per host. One SysV segment per postmaster → `kernel.shmmni=32768`; POSIX DSM segments in `/dev/shm` are swept at agent start and on purge (exp 12 left 7,600 stale ones); `RemoveIPC=no`, `LimitNOFILE=1048576` (`neon.py prepare` and `nodes.systemd_unit` have them; `pgcopy.py install` must call the same code. Checked on n0 on 5 Nov: `RemoveIPC=no` is already set on all 16 nodes, `kernel.shmmni` is still the default 4096). PG17 on Linux uses POSIX unnamed semaphores. `huge_pages=off`, `dynamic_shared_memory_type=posix`, parallel query off. Ports `24000+slot` (Neon's agent uses 20000+). |
+| Network | Measured 5 Nov (`.agent/network-probe-2026-11-05-xl170/`): one 25 GbE LAN, ping 0.07-0.15 ms (median 0.11), iperf3 13 Gbit/s one stream / 23.3 with 4; n0 sending to all 15 at once 23.9 Gbit/s total (0.8-1.9 per host). Two switches, {n0 n2 n5 n6 n7 n9 n11 n12 n13} and {n1 n3 n4 n8 n10 n14 n15} (+0.6 us RDMA, negligible for TCP). `/mydata` writes at only ~350 MB/s (reads ~365 MB/s), so **the disk, not the network, bounds bulk copying**. A single 0.3 GB fork with `--no-sync` goes to the page cache (~0.2 s on the wire, start time on top). Setup phases writing ~24 GB per host are disk bound (≥ ~70 s per host). No netem on any interface. Every address is a LAN address in-cluster. |
+| Seed-node load | Every fork reads from a run root on the seed node. `--checkpoint=fast` = one immediate checkpoint per request, coalesced by the checkpointer (a batch of 64 setup forks costs ~2 checkpoints on an idle 40 MB-buffer parent). Parents need `max_wal_senders=96`, `max_connections=160`, `wal_keep_size=512MB`, role `bench` with `REPLICATION`, and a `host replication` pg_hba line. Per host, concurrent copies are throttled to 16 (SATA SSD write bound: 64 × 0.3 GB would take ≈ 40 s). Nothing limits copies in total on the seed: in a multi-node setup phase, up to 15 hosts × 16 = 240 `pg_basebackup`s read from n0 at once (each root sees only its own host's ≤ 16 copies, i.e. ≤ 32 WAL senders with `-X stream`, under 96). Setup is not timed, so this costs only setup time. n0's single 25 GbE NIC caps the aggregate (fan-out probe below). Timed forks happen one at a time per creator, while no other node is forking. |
 | Copy consistency | `pg_basebackup` is a consistent online copy (backup_label; the child recovers at start as a primary, no recovery.signal). The run root is never written by the workloads (branches get the `updates_per_branch` divergence). |
-| Density vs exp 12 | Exp 12 put ≤ 146 computes on each of 7 nodes and 20 client processes on a separate node. Here client processes share the host. The report shows node CPU split into `postgres` and client. |
-| Data at risk | Re-instantiating CloudLab wipes `/mnt/ssd` on every node: a0 holds `neon-src` (40 GB), `neon-rdma` (23 GB), `exp12` (19 GB), `cargo`/`rustup` (3 GB); b0 holds `exp12` (18 GB). **Copy `exp12` (both nodes) and the two Neon source trees off-cluster before re-instantiating.** |
+| Density vs exp 12 | Exp 12 put ≤ 146 computes on each of 7 nodes and 20 client processes on a separate node; here ≤ 69 instances per host at 15 hosts. Here client processes share the host. The report shows node CPU split into `postgres` and client. |
+| Coordinator | pc20 (UMass) → Utah: 51 ms RTT, ssh to public IPs only; the 10.10.1.x LAN is unreachable. Agents bind the LAN address only (never public: unauthenticated HTTP), so the coordinator never calls them directly. Commands that talk to agents run on a node over ssh. `deploy-client` rsyncs ~34 MB of repo to each node over the WAN (fine). Clocks: NTP synchronised on pc20 and the nodes. |
+| Node-to-node ssh | Not set up: no node has a private key (n0 → n1 `Permission denied (publickey)`). The multi-node driver on n1 starts `node_run.sh` on the other hosts over ssh, and `common.sh` ssh's to its own node. `pgcopy.py install` creates a cluster-only key (`~/.ssh/cluster_ed25519`, made on the coordinator), puts it on all 16 nodes plus an `~/.ssh/config` entry for `10.10.1.*`, and adds it to `authorized_keys`. `dassl_rsa` is never copied to the nodes. |
 
 ## Design
 
@@ -64,7 +73,7 @@ Stdlib HTTP server, one per seed/host node (systemd unit `pgcopy-agent`), modell
   - `init: true` (the seed only): `initdb -D dir -U bench --pwfile --auth=scram-sha-256`;
   - else, under a per-node copy semaphore (16): `pg_basebackup -h HOST -p PORT -U bench -D dir -Fp -X stream
     --no-slot --checkpoint=fast --no-sync --no-manifest` (timed → `copy_ms`; `bytes` = size of dir after);
-  - **overwrite** `postgresql.auto.conf` entirely (the copy inherits the parent's: port, `listen_addresses='*'`,
+  - **overwrite** `postgresql.auto.conf` entirely (the copy inherits the parent's: port, `listen_addresses='<node LAN ip>,127.0.0.1'` (not `*`: the public interface faces the internet),
     `unix_socket_directories='<dir>'`, `shared_buffers`, `huge_pages=off`, `dynamic_shared_memory_type=posix`,
     `max_parallel_workers_per_gather=0`, `log_min_duration_statement=0` iff statement_log, `logging_collector=off`,
     `statement_timeout=600s`; parents (`parent_role`: seed and run roots) get `max_wal_senders=96`,
@@ -79,7 +88,8 @@ Stdlib HTTP server, one per seed/host node (systemd unit `pgcopy-agent`), modell
   `GET /instances/<name>`, `DELETE /instances/<name>` (SIGTERM postmaster, `kill_by_cwd`, rmtree), `DELETE
   /instances` (all but `--protect seed`, parallel, then DSM sweep), `POST /instances/<name>/sql {sql, db}`,
   `GET /stats` (`instances`, `data_bytes`, `wal_bytes` from a cached scandir refreshed ≤ 1/s), `GET /time`.
-- Args: `--listen`, `--host`, `--pg-bin /usr/lib/postgresql/17/bin`, `--instance-root /mnt/ssd/pgcopy/instances`,
+- Args: `--listen <LAN ip>:<port>` (LAN only, never `0.0.0.0`: the public side is internet-facing), `--host`,
+  `--pg-bin /usr/lib/postgresql/17/bin`, `--instance-root /mydata/pgcopy/instances`,
   `--archive-dir`, `--protect seed`, `--shared-buffers 40MB`, `--max-concurrent-copies 16`,
   `--max-concurrent-starts 32`, `--start-timeout 300`, `--disk-guard-gb 20`, `--pg-port-base 24000`.
 
@@ -125,19 +135,25 @@ class-level `_INSTANCES` cache, `_connect`/`_ensure_conn` overrides, `purge/setu
   `nodes.cpu_agent_service` already supports). `shell_vars`: `RUNNER_BACKEND=pgcopy`, `SEED_DB=bench`,
   `ENV_FILE=<state_dir>/pgcopy.env`, `SERVER_NODE` = the client's own node, `SERVER_SAME_HOST=1`. `pgcopy_env(view)`
   as in §2 (`PGCOPY_LOCAL_AGENT` = the viewer's agent when the viewer is a host).
-- `scripts/setup/topologies/cloudlab_pgcopy.toml`: 16 nodes, one zone (addresses filled in when the new cluster
-  exists), `[pgcopy] seed = <n0>, hosts = [<n1>..<n15>]`, `[workload] max_procs = 20`,
-  `[pgcopy.workload] shared_buffers = "40MB"`; `state_dir = /mnt/ssd/bench-pgcopy` on the coordinator.
+- `scripts/setup/topologies/cloudlab_pgcopy.toml`: 16 nodes n0-n15 (`host`, `lan`, `public` from
+  `.agent/network-probe-2026-11-05-xl170/nodes.txt`), all `zone = "utah"`, `data_root = "/mydata"`,
+  `disk_dev = "sda4"`. The zone must not be the default `z0`: `neon.py`'s coordinator is a `Node` in zone `z0`, so
+  cluster nodes in `z0` would be handed to it by LAN address, which it cannot reach. In-cluster viewers still get LAN
+  addresses. `[pgcopy] seed = "n0", hosts = ["n1", ..., "n15"]`, `[workload] max_procs = 20`,
+  `[pgcopy.workload] shared_buffers = "40MB"`; `state_dir = "/mydata/bench-pgcopy"` (coordinator and nodes).
 - `scripts/setup/pgcopy.py` (new; modelled on `scripts/setup/doltgres.py` with `nodes.Runner`): `install` (PGDG
-  `postgresql-17` on seed + hosts, `neon.py`'s `prepare`/`remove_ipc_no`/`check_linger` equivalents, agent and
+  `postgresql-17` on seed + hosts, `neon.py`'s `prepare` (incl. `kernel.shmmni`)/`remove_ipc_no`/`check_linger` equivalents, the cluster ssh key (see
+  Validity), agent and
   `cpu_agent.py` to `<data_root>/pgcopy/svc`, units `pgcopy-agent` and `dbfork-cpu-agent`), `start|stop|status`,
-  `seed` (on the seed node: `POST init` instance `seed` with `parent_role`; `ALTER ROLE bench REPLICATION`,
+  `seed` (**runs on the seed node** over ssh, as `neon.py seed` runs `neon_ctl.py`; loading 296 MB row by row from the
+  coordinator at 51 ms would take hours: `POST init` instance `seed` with `parent_role`; `ALTER ROLE bench REPLICATION`,
   `ALTER ROLE bench SET statement_timeout='600s'`, `CREATE DATABASE bench`, `CREATE EXTENSION pg_prewarm`; then
   `runner2.seed_generated_database(tp.Backend.PGCOPY, ...)` with `PGCOPY_RUN_ROOT=seed`, `VACUUM ANALYZE` (copies
   carry `pg_statistic`), sizes → `<state_dir>/pgcopy_seed.json`, as `neon_ctl.py seed`), `env-init [--view NODE]`,
   `deploy-client` (repo + venv + `pgcopy.env` on **every host**, plus `pgcopy.<node>.env` per host with its
   `PGCOPY_LOCAL_AGENT`, via `Runner.deploy_repo`), `purge`, `wipe --yes`, `smoke` (one fork per host from a run root,
-  `select count(*) from stock` = 300,000, delete).
+  `select count(*) from stock` = 300,000, delete). `purge`, `smoke` and `status` also run on n0 over ssh
+  (`pgcopy_ctl.py` there, the `neon_ctl.py` pattern), because only in-cluster nodes reach the agents.
 
 ### 5. Workloads
 - `scripts/workloads/common.sh`: `--backend neon|doltgres|pgcopy`; `load_env` also unsets `PGCOPY_*`; `guards` gets
@@ -153,7 +169,8 @@ class-level `_INSTANCES` cache, `_connect`/`_ensure_conn` overrides, `purge/setu
   `(127.0.0.1, port)`, prewarm, the backend-agnostic `sweep`.
 - **Multi-node co-located driver** (`scripts/workloads/multi_client/multi_scaling.py` + `node_run.sh`, generalised):
   - `--backend neon|pgcopy`; per node the command sources `pgcopy.<node>.env` (its `PGCOPY_LOCAL_AGENT`), sets
-    `PGCOPY_NO_PURGE` via the patch; the orchestrator purges once per point (`scripts/setup/pgcopy.py purge`). Run
+    `PGCOPY_NO_PURGE` via the patch; the orchestrator (on n1, never on the coordinator) purges once per point by
+    calling `dblib.pgcopy.purge()` with its `pgcopy.env`. Run
     ids come from `RUNNER_BACKEND` (`pgcopy_chw3_...`), `md5s()` lists `dblib/pgcopy.py`.
   - `run` (scaling_data) unchanged otherwise: each node's runner has its own nonce → its own run root on the seed
     node, shares `n_i` of N, GO barrier via `BENCH_SYNC_ADDR`.
@@ -164,7 +181,7 @@ class-level `_INSTANCES` cache, `_connect`/`_ensure_conn` overrides, `purge/setu
     GO barrier; when the creator exits the orchestrator sends SIGINT to the others (verify the runner writes its
     summary on SIGINT, as the drivers' `timeout -s INT` assumes; else add a `BENCH_STOP` check in `patches.py`).
     Merged summary = node 1's (create latencies) + a `multi_client` block (each node's background ops/s, client CPU),
-    at `scaling_branch/branch_create/mixed/<rid>_BRANCH_CREATE_threads1_summary.json` so exp 12's `plot.py` reads it.
+    at `scaling_branch/branch_create/mixed/<rid>_BRANCH_CREATE_threads1_summary.json` (exp 12's layout, for a later joint plot).
     `--single-node` runs the plain `scaling_branch.sh` on hosts[0] with `--ns 1,4,16,64,128` (secondary series).
   - `run-ceiling`: each node runs `ceiling_check.py` on its share, started together over ssh; per-node CSVs merged
     by summing throughput per (kind, N) into `scaling_data/ceiling_check.csv`.
@@ -172,15 +189,24 @@ class-level `_INSTANCES` cache, `_connect`/`_ensure_conn` overrides, `purge/setu
     ceiling → `run-ceiling`; low_contention and cold_start single node.
 
 ### 6. Experiment directory `experiment/13-pgcopy-nodes/`
-`README.md`, `plan.md` (exported), `REPRODUCE.md`, `report.md`, `scripts/` (`launch.sh` as exp 12's with the client
-host from the topology; `chain.sh` = install → start → seed → env-init → deploy-client → smoke → run_all; `pull.sh`;
-`plot.py` reusing exp 12's `plot.py`/`refs.py` to add the pgcopy series next to Doltgres 10c, Neon local 10c, Neon
-TCP, Neon RDMA; `fork_phases.py` for the copy/start split and bytes), `figures/`, `logs/`, `code/`,
-`data -> /mnt/ssd/exp13`. Results layout `/mnt/ssd/exp13/pgcopy/<workload>/...`.
+`README.md`, `plan.md` (exported), `REPRODUCE.md`, `report.md`, `scripts/`, `figures/`, `logs/`, `code/`,
+`data -> /mydata/exp13` (on the coordinator). Experiment 12's scripts are gone, so all of these are written new:
+- `launch.sh`: ssh to the client node (n1) and start a transient systemd unit (`systemd-run --user`, linger on), so
+  a run survives the coordinator's ssh session.
+- `chain.sh`: install → start → seed → env-init → deploy-client → smoke → `run_all.sh --multi`, every step that
+  touches agents executed on a node.
+- `pull.sh`: rsync `/mydata/exp13` from n1 (and per-node results and agent archives from n2-n15) to the coordinator.
+- `plot.py`: the pgcopy series alone (low_load, scaling, branch_create, cold_start). References to Doltgres 10c,
+  Neon local 10c, Neon TCP and Neon RDMA are added when experiments 11/12's data is re-collected.
+- `fork_phases.py`: the copy/start split and bytes.
+
+Results layout: `/mydata/exp13/pgcopy/<workload>/...` on n1, pulled to the same path on the coordinator. The network
+and disk probe of 5 Nov (`.agent/network-probe-2026-11-05-xl170/`) goes into the README's cluster section and the
+report's validity section.
 
 ## Order of work
-1. Export plan → `experiment/13-pgcopy-nodes/plan.md`; user backs up `/mnt/ssd/exp12` (a0, b0) and the Neon trees
-   before the cluster changes.
+1. Export plan → `experiment/13-pgcopy-nodes/plan.md`. On the coordinator: uv, protoc 32, `uv sync --group dev`,
+   `build_protos.py` (none installed on pc20 yet).
 2. Agent + backend + proto/runner plumbing; `tests/test_pgcopy.py` (mocked `http`, as `tests/test_neon_local.py`;
    no-purge in multi-client mode as `tests/test_multi_client.py`).
 3. `topo.py` `[pgcopy]` (+ `tests/test_topo.py` cases), `pgcopy.py` setup script, topology file;
@@ -194,8 +220,9 @@ TCP, Neon RDMA; `fork_phases.py` for the copy/start split and bytes), `figures/`
 - `uv run pytest tests/test_pgcopy.py tests/test_topo.py tests/test_multi_client.py`.
 - `uv run python scripts/setup/topo.py check <topo>`; `scripts/setup/pgcopy.py <topo> smoke` (one fork per host,
   300,000 stock rows, delete; agents report 0 instances afterwards, root agent only `seed`).
-- `scripts/workloads/run_all.sh --topology <topo> --backend pgcopy --outdir /mnt/ssd/exp13/smoke --smoke` passes
+- `scripts/workloads/run_all.sh --topology <topo> --backend pgcopy --outdir /mydata/exp13/smoke --smoke` (on n1) passes
   every `check` (failed_ops 0, intended processes, `remote_cpu.*.node_cores` present for seed and hosts).
 - Fork sanity: BRANCH rows ≈ copy_ms + start_ms (+ HTTP); `fork_bytes` ≈ 0.3 GB; a branch's `stock` count equals
   the seed's; `max_wal_senders` never exhausted during a 64-way setup (agent log).
-- Netem: `az_netem.sh status` shows no `netem` on any node before the full run (captured into `logs/`).
+- Netem: `tc qdisc show` on `ens1f1np1` and `eno49np0` of all 16 nodes has no `netem` before the full run (captured
+  into `logs/`; `az_netem.sh` still lists the old hosts in its `nodes.txt`).

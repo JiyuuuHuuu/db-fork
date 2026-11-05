@@ -212,16 +212,27 @@ __marimo__/
 # Experiment data (parquet files are compressed into zip for version control)
 experiments/*/results/data/*.parquet
 
-# Experiments (experiment/<n>-<name>/): only the high-level record goes to git:
-# the Markdown files (README, plan, report, REPRODUCE), the PNG plots and the
-# logs. Raw data, figure tables, scripts, configs and code patches stay on disk.
+# Experiments (experiment/<n>-<name>/): everything but the raw data and the execution logs goes to git:
+# the Markdown files, figures (PNG + their aggregated CSV tables), results/ (aggregated data: runner summaries,
+# per-point tables), scripts/, code/ (base commit, shared-code patch) and logs/ (probes, status snapshots).
+# Raw data (data/, usually a symlink to /mydata: parquet, per-event jsonl) and *.log / *.out stay on disk.
+# (Experiments up to 12 kept only the Markdown and PNGs, and lost their data with the cluster.)
 experiment/*/*
 !experiment/*/*.md
 !experiment/*/figures/
 experiment/*/figures/*
 !experiment/*/figures/*.png
+!experiment/*/figures/*.csv
+!experiment/*/results/
+!experiment/*/results/**
+!experiment/*/scripts/
+!experiment/*/scripts/**
+!experiment/*/code/
+!experiment/*/code/**
 !experiment/*/logs/
 !experiment/*/logs/**
+experiment/*/logs/**/raw*/
+experiment/*/**/__pycache__/
 
 # Potentially large DB setup files.
 db_setup/*.sql

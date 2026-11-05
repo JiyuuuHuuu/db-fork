@@ -145,9 +145,56 @@ def patch_runner2(mod) -> None:
     cls.track_modified_key = track_modified_key
     cls.untrack_modified_key = untrack_modified_key
     sync = patch_cross_node_start(mod)
+    sample = patch_background_sample(mod)
     _applied.add("runner2")
     _log(f"active: Faker value pool ({POOL_SIZE}/column), comment-strip fast path, set-based key tracking"
-         f"{'; cross-node start ' + sync if sync else ''}; {files_md5()}")
+         f"{'; cross-node start ' + sync if sync else ''}"
+         f"{f'; background rows sampled 1/{sample}' if sample > 1 else ''}; {files_md5()}")
+
+
+# ---------------------------------------------------------------- 3b. background row sampling (experiment 13)
+def bg_sample() -> int:
+    """BENCH_BG_SAMPLE=K: background clients record 1 operation in K (default 20 in multi-client mode, else off)."""
+    v = os.environ.get("BENCH_BG_SAMPLE", "")
+    if v.strip():
+        return max(1, int(v))
+    return 20 if os.environ.get("BENCH_SYNC_ADDR") else 1
+
+
+def patch_background_sample(mod) -> int:
+    """The runner keeps every result row in memory until the run ends. Background clients (OperationRunner.run_until,
+    used only by them) running fast operations for minutes produce millions of rows: about 5 GB per client process at
+    pgcopy's ~0.5 ms MIXED ops over a 7-minute window, which ran a 62 GB node out of memory (experiment 13,
+    scaling_branch N = 256). With K > 1 a background client records only every K-th operation (recording is
+    per thread, so the timed workers are untouched): the background load is unchanged, its statement-latency quantiles
+    come from a 1/K sample, and its ops_in_window / throughput in the summary are 1/K of the real ones (multiply by
+    K; scripts/workloads/multi_client/multi_scaling.py run-branch does)."""
+    k = bg_sample()
+    if k <= 1:
+        return 1
+    cls = mod.OperationRunner
+
+    def run_until(self, stopped):
+        rcol = self.context.db_tools.result_collector
+        done = failed = 0
+        first_error = ""
+        i = 0
+        try:
+            while not stopped():
+                rcol.set_recording(i % k == 0)
+                i += 1
+                try:
+                    self.operation.execute(self.context)
+                    done += 1
+                except Exception as e:  # noqa: BLE001 (as the original)
+                    failed += 1
+                    first_error = first_error or f"{type(e).__name__}: {e}"[:300]
+        finally:
+            rcol.set_recording(True)
+        return done, failed, first_error
+
+    cls.run_until = run_until
+    return k
 
 
 # ---------------------------------------------------------------- 4. cross-node start
@@ -238,5 +285,52 @@ def patch_neon_local(mod) -> None:
     _applied.add("neon_local")
 
 
+def patch_pgcopy(mod) -> None:
+    """dblib.pgcopy in multi-client mode (experiment 13): as patch_neon_local, setup_run copies this runner's run
+    root without the cluster-wide purge (it would delete the other nodes' instances), teardown_run does nothing."""
+    if "pgcopy" in _applied or not (SYNC_ADDR and SYNC_KEY):
+        return
+
+    def setup_run(db_name, log=print):
+        root = mod.new_run(db_name)
+        mod.create_run_root(root, log=lambda m: log(m + " (multi-client: no purge)"))
+        return root
+
+    def teardown_run(db_name, log=print):
+        log("pgcopy teardown: skipped (multi-client: the orchestrator purges after every node finished)")
+
+    mod.setup_run, mod.teardown_run = setup_run, teardown_run
+    _applied.add("pgcopy")
+
+
+# ---------------------------------------------------------------- 5. background-only nodes (experiment 13)
+HOLD_KEY = os.environ.get("BENCH_HOLD_KEY", "")
+
+
+def patch_branch_ops(mod) -> None:
+    """With BENCH_HOLD_KEY (and BENCH_SYNC_ADDR) set, a node of a multi-node scaling_branch point only keeps its busy
+    branches busy: its runner is the creator runner with --branch-create-ops 1, and that one create, instead of
+    creating a branch, blocks until the coordinator answers GO for BENCH_HOLD_KEY, which it does when the measuring
+    node's creator has finished. The node's timed window (and its background load) thus spans the measuring node's
+    creates; it records no BRANCH row."""
+    if "branch_ops" in _applied or not (SYNC_ADDR and HOLD_KEY):
+        return
+    cls = mod.BranchCreateOperation
+
+    def execute(self, context):
+        host, port = SYNC_ADDR.rsplit(":", 1)
+        t0 = time.time()
+        with socket.create_connection((host, int(port)), timeout=60) as s:
+            s.sendall(f"{HOLD_KEY}\n".encode())
+            s.settimeout(SYNC_TIMEOUT)
+            line = s.makefile("r").readline().strip()
+        print(f"[fast_client] hold {HOLD_KEY}: {line or 'closed'} after {time.time() - t0:.1f}s", file=sys.stderr,
+              flush=True)
+
+    cls.execute = execute
+    _applied.add("branch_ops")
+
+
 TARGETS = {"microbench.datagen": patch_datagen, "util.sql_parse": patch_sql_parse,
-           "microbench.runner2": patch_runner2, "dblib.neon_local": patch_neon_local}
+           "microbench.runner2": patch_runner2, "dblib.neon_local": patch_neon_local,
+           "dblib.pgcopy": patch_pgcopy, "microbench.operations.branch": patch_branch_ops}

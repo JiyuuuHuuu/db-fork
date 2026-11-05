@@ -31,6 +31,7 @@ enum Backend {
     BAUPLAN = 11;
     // 12 is TERMINUSDB in microbench/task2.proto
     NEON_LOCAL = 13;
+    PGCOPY = 14;
 }
 
 // ---------------------------------------------------------------------------

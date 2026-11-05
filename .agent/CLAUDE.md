@@ -40,6 +40,7 @@ Rule: every experiment keeps all of its data and files in its own directory, `ex
 - Experiment-specific scripts (drivers, calibration, plotting, node setup, one-off probes) go in its `scripts/`, resolve the repo root from their own location, and write to the experiment's `data/` by default.
 - Reusable benchmark code stays in the shared tree (`microbench/`, `macrobench/`, `dblib/`, `util/`, `scripts/`). List the shared changes an experiment depends on in its README.
 - Pull everything produced on remote machines (results, smoke tests, aborted attempts, logs) back into the directory. Keep data that was not analysed under `data/superseded/` with a note in the README saying why.
+- Commit every experiment's aggregated data, not just its Markdown and PNGs: everything but the raw data and the execution logs goes to git (`.gitignore` encodes it). Put aggregated results (runner summaries, per-point tables) under `results/` with a `scripts/collect_results.py` that copies them from `data/`, keep figure tables as `figures/*.csv` aggregated (per-event tables go to `data/`), and leave raw data (parquet, per-event jsonl, `data/` itself) and `*.log` / `*.out` out. Experiment 12 committed only Markdown and PNGs and its numbers were lost with the cluster; experiment 13 is the template.
 - Remote machines used by experiments are described in `.agent/cloudlab.md`.
 
 ## Architecture

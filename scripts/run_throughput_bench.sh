@@ -206,7 +206,7 @@ if [ -z "$BACKEND" ] || [ -z "$SWEEP_MODE" ]; then
     echo "Usage: $0 <backend> [<sql_dump_path>] {--sweep-concurrency | --sweep-branches | --sweep-proportional | --sweep-threads} [options]"
     echo ""
     echo "Required arguments:"
-    echo "  backend: dolt, dolt_mysql, seekdb, neon, neon_local, xata, file_copy"
+    echo "  backend: dolt, dolt_mysql, seekdb, neon, neon_local, xata, file_copy, pgcopy"
     echo "  sql_dump_path: Path to SQL dump file (omit to generate CH-benCHmark data, see --generated-scale)"
     echo "  --sweep-concurrency: Fix threads/branches, vary concurrent requests (requires --threads and --branches; async only)"
     echo "  --sweep-branches: Fix threads, vary branches (requires --threads)"
@@ -275,7 +275,7 @@ BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 BACKEND_LOWER=$(echo "$BACKEND" | tr '[:upper:]' '[:lower:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|NEON_LOCAL|XATA|FILE_COPY)$ ]]; then
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|NEON_LOCAL|XATA|FILE_COPY|PGCOPY)$ ]]; then
     echo "Error: Invalid backend '$BACKEND'"
     exit 1
 fi
@@ -299,8 +299,8 @@ if [ -n "$SQL_DUMP_PATH" ] && [ ! -f "$SQL_DUMP_PATH" ]; then
     echo "Error: SQL dump file not found: $SQL_DUMP_PATH"
     exit 1
 fi
-if [ -n "$SEED_DB" ] && [[ ! "$BACKEND" =~ ^(dolt|dolt_mysql|neon_local)$ ]]; then
-    echo "Error: --seed-db is supported on dolt, dolt_mysql and neon_local only"
+if [ -n "$SEED_DB" ] && [[ ! "$BACKEND" =~ ^(dolt|dolt_mysql|neon_local|pgcopy)$ ]]; then
+    echo "Error: --seed-db is supported on dolt, dolt_mysql, neon_local and pgcopy only"
     exit 1
 fi
 

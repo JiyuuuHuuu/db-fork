@@ -9,7 +9,7 @@
 #            reads, 20% point updates)
 # Neon: statement logging on (the compute log holds per-statement durations).
 #
-#   scripts/workloads/low_contention.sh --topology T --backend neon|doltgres --outdir DIR \
+#   scripts/workloads/low_contention.sh --topology T --backend neon|doltgres|pgcopy --outdir DIR \
 #       [--parts data,branch] [--ops READ,...] [--smoke] [--dry-run]
 {
 source "$(dirname "$0")/common.sh"
@@ -27,10 +27,9 @@ wl_init low_contention
 (( RUN_TIMEOUT < 7200 )) && RUN_TIMEOUT=7200   # experiments 5 and 11: 40,000 reads over a WAN round trip
 $SMOKE && CREATES=10
 RUN_ENV=()
-if [[ $BACKEND == neon ]]; then
-    export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts true false)"
-    RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
-fi
+[[ $BACKEND == neon ]] && export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts true false)"
+[[ $BACKEND == pgcopy ]] && export PGCOPY_INSTANCE_OPTS="$(pgcopy_opts true)"
+prewarm_backend && RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
 
 ops() {  # experiment 4's counts
     local k
@@ -38,7 +37,7 @@ ops() {  # experiment 4's counts
     smoke_k "$k"
 }
 
-wl_start "parts=$PARTS ops='$DATA_OPS' creates=$CREATES connect_every=$CONNECT_EVERY prewarm_heap_blocks=$PREWARM_HEAP_BLOCKS opts=${NEON_LOCAL_COMPUTE_OPTS:-}"
+wl_start "parts=$PARTS ops='$DATA_OPS' creates=$CREATES connect_every=$CONNECT_EVERY prewarm_heap_blocks=$PREWARM_HEAP_BLOCKS opts=${NEON_LOCAL_COMPUTE_OPTS:-${PGCOPY_INSTANCE_OPTS:-}}"
 one_data() {
     local op=$1 dir="$OUTROOT/data_ops/$1"
     $DRY || mkdir -p "$dir"

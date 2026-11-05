@@ -8,7 +8,7 @@
 # least 3,000 / 600 / 2,500 / 2,500 per client, but at most 1,000,000 reads and 640,000 writes per run (the
 # runner keeps every result row in memory until the run ends).
 #
-#   scripts/workloads/scaling_data.sh --topology T --backend neon|doltgres --outdir DIR \
+#   scripts/workloads/scaling_data.sh --topology T --backend neon|doltgres|pgcopy --outdir DIR \
 #       [--ns 1,4,...] [--ops READ,...] [--ceiling [--ceiling-ns 128,256,...] [--ceiling-seconds 30]] [--smoke] [--dry-run]
 #
 # --ceiling: after the sweep, ceiling_check.py (experiment 5's minimal asyncio client, same load shape) at the
@@ -32,10 +32,9 @@ wl_init scaling_data
 NS=${NS_ARG:-$NS_DATA}
 $SMOKE && NS=${NS_ARG:-1,4}
 RUN_ENV=()
-if [[ $BACKEND == neon ]]; then
-    export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts false true)"
-    RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
-fi
+[[ $BACKEND == neon ]] && export NEON_LOCAL_COMPUTE_OPTS="$(compute_opts false true)"
+[[ $BACKEND == pgcopy ]] && export PGCOPY_INSTANCE_OPTS="$(pgcopy_opts false)"
+prewarm_backend && RUN_ENV=("DBFORK_PREWARM_SQL=$(neon_prewarm_sql)")
 
 ops_per_client() {  # OP N (experiment 5's run_scaling.sh)
     local op=$1 n=$2 total min cap
@@ -59,7 +58,7 @@ one() {  # op n
         --output-dir "$dir"   # one directory per op: the parquet name has no op in it
 }
 
-wl_start "ns=$NS ops='$DATA_OPS' prewarm_heap_blocks=$PREWARM_HEAP_BLOCKS opts=${NEON_LOCAL_COMPUTE_OPTS:-}"
+wl_start "ns=$NS ops='$DATA_OPS' prewarm_heap_blocks=$PREWARM_HEAP_BLOCKS opts=${NEON_LOCAL_COMPUTE_OPTS:-${PGCOPY_INSTANCE_OPTS:-}}"
 IFS=',' read -ra NLIST <<< "$NS"
 for n in "${NLIST[@]}"; do
     for op in $DATA_OPS; do

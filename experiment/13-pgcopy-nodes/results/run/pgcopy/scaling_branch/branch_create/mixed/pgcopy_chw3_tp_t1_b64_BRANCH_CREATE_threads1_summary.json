@@ -1,0 +1,609 @@
+{
+  "run_id": "pgcopy_chw3_tp_t1_b64",
+  "backend": "PGCOPY",
+  "operation": "BRANCH_CREATE",
+  "num_ops": 100,
+  "num_threads": 1,
+  "num_branches": 64,
+  "execution_mode": "sync",
+  "concurrent_requests": 1,
+  "scale_factor": 1,
+  "intended_ops": 100,
+  "total_ops": 120,
+  "failed_ops": 0,
+  "elapsed_time": 179.23112607002258,
+  "wall_time": 201.27538299560547,
+  "throughput": 0.6695265640027169,
+  "data_ops_count": 0,
+  "data_ops_time": 0,
+  "data_throughput": 0,
+  "loaded_branches": 1,
+  "num_processes": 79,
+  "server_cpu_cores": null,
+  "client_cpu_cores": null,
+  "remote_cpu": {
+    "server": {
+      "ncpu": 20,
+      "samples": 195,
+      "proc_cores": 1.2978052746510065,
+      "node_cores": 3.3064673850819557,
+      "node_iowait_cores": 3.235503471197605,
+      "disk_util": 0.9991608285794692,
+      "disk_reads_per_s": 0.0,
+      "disk_writes_per_s": 2291.4754844886247,
+      "disk_read_bytes_per_s": 0.0,
+      "disk_write_bytes_per_s": 233905371.644255
+    },
+    "computes": {
+      "ncpu": 20,
+      "samples": 195,
+      "proc_cores": 1.1680719302857365,
+      "node_cores": null,
+      "node_iowait_cores": null,
+      "disk_util": null,
+      "disk_reads_per_s": null,
+      "disk_writes_per_s": null,
+      "disk_read_bytes_per_s": null,
+      "disk_write_bytes_per_s": null
+    },
+    "copy": {
+      "ncpu": 20,
+      "samples": 195,
+      "proc_cores": 0.1297340198865351,
+      "node_cores": null,
+      "node_iowait_cores": null,
+      "disk_util": null,
+      "disk_reads_per_s": null,
+      "disk_writes_per_s": null,
+      "disk_read_bytes_per_s": null,
+      "disk_write_bytes_per_s": null
+    },
+    "seed": {
+      "ncpu": 20,
+      "samples": 195,
+      "proc_cores": 0.0008927020853369368,
+      "node_cores": 0.08862887914954544,
+      "node_iowait_cores": 0.0,
+      "disk_util": 0.00035708083413395013,
+      "disk_reads_per_s": 0.0,
+      "disk_writes_per_s": 0.8313288169700401,
+      "disk_read_bytes_per_s": 0.0,
+      "disk_write_bytes_per_s": 31971.589565091872
+    }
+  },
+  "background": {
+    "operation": "MIXED",
+    "clients": 5,
+    "ops_in_window": 31450,
+    "throughput": 175.47175364904538,
+    "failed": 0,
+    "first_error": null,
+    "latency": {
+      "statements": {
+        "n": 31450,
+        "mean": 0.0011440740253436273,
+        "p50": 0.0004303564992369502,
+        "p95": 0.0010991781004122453,
+        "p99": 0.028182851429901252,
+        "max": 0.07140204300048936
+      }
+    }
+  },
+  "latency": {
+    "ops": {
+      "n": 120,
+      "mean": 1.4876362230500642,
+      "p50": 1.7624121944991202,
+      "p95": 1.9033766901503442,
+      "p99": 1.9295937146506732,
+      "max": 1.980394862999674
+    },
+    "statements": {
+      "n": 0
+    }
+  },
+  "data_source": {
+    "source": "generated",
+    "scale_factor": 3,
+    "rows": {},
+    "seed_db": "bench",
+    "seed_db_created": false,
+    "seed_sec": 0.0
+  },
+  "support": {
+    "workflow_supported": true,
+    "unsupported_ops": [],
+    "op_status_counts": {
+      "BRANCH": {
+        "ok": 100,
+        "unsupported": 0,
+        "failed": 0
+      },
+      "CONNECT": {
+        "ok": 20,
+        "unsupported": 0,
+        "failed": 0
+      },
+      "EXEC": {
+        "ok": 34765,
+        "unsupported": 0,
+        "failed": 0
+      },
+      "READ": {
+        "ok": 27918,
+        "unsupported": 0,
+        "failed": 0
+      },
+      "UPDATE": {
+        "ok": 6827,
+        "unsupported": 0,
+        "failed": 0
+      }
+    }
+  },
+  "backend_observations": {
+    "forks": 5,
+    "fork_copy_ms": 34325.17218589783,
+    "fork_start_ms": 5373.257160186768,
+    "fork_bytes": 1798626117
+  },
+  "multi_client": {
+    "go_time": 1793881421.2733893,
+    "creator": "n1",
+    "remote_cpu_from": "n1",
+    "nodes": [
+      {
+        "node": "n1",
+        "branches": 5,
+        "procs": 6,
+        "num_processes": 6,
+        "elapsed_time": 179.23112607002258,
+        "background": {
+          "operation": "MIXED",
+          "clients": 5,
+          "ops_in_window": 629000,
+          "throughput": 3509.4350729809075,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 31450,
+              "mean": 0.0011440740253436273,
+              "p50": 0.0004303564992369502,
+              "p95": 0.0010991781004122453,
+              "p99": 0.028182851429901252,
+              "max": 0.07140204300048936
+            }
+          },
+          "ops_in_window_sampled": 31450,
+          "throughput_sampled": 175.47175364904538,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n1"
+      },
+      {
+        "node": "n2",
+        "branches": 5,
+        "procs": 6,
+        "num_processes": 6,
+        "elapsed_time": 182.45165920257568,
+        "background": {
+          "operation": "MIXED",
+          "clients": 5,
+          "ops_in_window": 1150860,
+          "throughput": 6307.752996218042,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 57543,
+              "mean": 0.0005310469701092021,
+              "p50": 0.0004944379998050863,
+              "p95": 0.0008957983998698182,
+              "p99": 0.0010126927398596307,
+              "max": 0.04195985500155075
+            }
+          },
+          "ops_in_window_sampled": 57543,
+          "throughput_sampled": 315.38764981090213,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n2"
+      },
+      {
+        "node": "n3",
+        "branches": 5,
+        "procs": 6,
+        "num_processes": 6,
+        "elapsed_time": 182.4514400959015,
+        "background": {
+          "operation": "MIXED",
+          "clients": 5,
+          "ops_in_window": 1144840,
+          "throughput": 6274.765490468262,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 57242,
+              "mean": 0.0005376875545932269,
+              "p50": 0.0004944515003444394,
+              "p95": 0.0009012460500343876,
+              "p99": 0.001023418890436005,
+              "max": 0.08056754900098895
+            }
+          },
+          "ops_in_window_sampled": 57242,
+          "throughput_sampled": 313.7382745234131,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n3"
+      },
+      {
+        "node": "n4",
+        "branches": 5,
+        "procs": 6,
+        "num_processes": 6,
+        "elapsed_time": 182.45209574699402,
+        "background": {
+          "operation": "MIXED",
+          "clients": 5,
+          "ops_in_window": 1154100,
+          "throughput": 6325.495989919395,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 57705,
+              "mean": 0.000532387380986863,
+              "p50": 0.0004924830009258585,
+              "p95": 0.0008952400003181537,
+              "p99": 0.0010140307211986507,
+              "max": 0.06812699500005692
+            }
+          },
+          "ops_in_window_sampled": 57705,
+          "throughput_sampled": 316.2747994959697,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n4"
+      },
+      {
+        "node": "n5",
+        "branches": 4,
+        "procs": 5,
+        "num_processes": 5,
+        "elapsed_time": 182.45121836662292,
+        "background": {
+          "operation": "MIXED",
+          "clients": 4,
+          "ops_in_window": 922360,
+          "throughput": 5055.378682901324,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 46118,
+              "mean": 0.0005318402895426697,
+              "p50": 0.0004970580002918723,
+              "p95": 0.0008985256485175341,
+              "p99": 0.0010046731413967795,
+              "max": 0.03222646900030668
+            }
+          },
+          "ops_in_window_sampled": 46118,
+          "throughput_sampled": 252.7689341450662,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n5"
+      },
+      {
+        "node": "n6",
+        "branches": 4,
+        "procs": 5,
+        "num_processes": 5,
+        "elapsed_time": 182.45064067840576,
+        "background": {
+          "operation": "MIXED",
+          "clients": 4,
+          "ops_in_window": 915460,
+          "throughput": 5017.576241969046,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 45773,
+              "mean": 0.0005412080767059563,
+              "p50": 0.0005014930011384422,
+              "p95": 0.0009057077993929852,
+              "p99": 0.0010102251193893608,
+              "max": 0.07399179999993066
+            }
+          },
+          "ops_in_window_sampled": 45773,
+          "throughput_sampled": 250.87881209845233,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n6"
+      },
+      {
+        "node": "n7",
+        "branches": 4,
+        "procs": 5,
+        "num_processes": 5,
+        "elapsed_time": 182.45148396492004,
+        "background": {
+          "operation": "MIXED",
+          "clients": 4,
+          "ops_in_window": 926940,
+          "throughput": 5080.473887393663,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 46347,
+              "mean": 0.000532686642308341,
+              "p50": 0.0004979440000170143,
+              "p95": 0.0008934634995966915,
+              "p99": 0.000998069099005079,
+              "max": 0.06618646100105252
+            }
+          },
+          "ops_in_window_sampled": 46347,
+          "throughput_sampled": 254.02369436968317,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n7"
+      },
+      {
+        "node": "n8",
+        "branches": 4,
+        "procs": 5,
+        "num_processes": 5,
+        "elapsed_time": 182.45177006721497,
+        "background": {
+          "operation": "MIXED",
+          "clients": 4,
+          "ops_in_window": 921980,
+          "throughput": 5053.280654171477,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 46099,
+              "mean": 0.0005371506176758418,
+              "p50": 0.0004987839984096354,
+              "p95": 0.0008955006005635369,
+              "p99": 0.0010006813599466096,
+              "max": 0.06971059400166268
+            }
+          },
+          "ops_in_window_sampled": 46099,
+          "throughput_sampled": 252.66403270857387,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n8"
+      },
+      {
+        "node": "n9",
+        "branches": 4,
+        "procs": 5,
+        "num_processes": 5,
+        "elapsed_time": 182.4518883228302,
+        "background": {
+          "operation": "MIXED",
+          "clients": 4,
+          "ops_in_window": 929860,
+          "throughput": 5096.46684694601,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 46493,
+              "mean": 0.0005303583740111481,
+              "p50": 0.0004934900007356191,
+              "p95": 0.0008906210005079629,
+              "p99": 0.0009974533992499358,
+              "max": 0.06995023000126821
+            }
+          },
+          "ops_in_window_sampled": 46493,
+          "throughput_sampled": 254.8233423473005,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n9"
+      },
+      {
+        "node": "n10",
+        "branches": 4,
+        "procs": 5,
+        "num_processes": 5,
+        "elapsed_time": 182.4515233039856,
+        "background": {
+          "operation": "MIXED",
+          "clients": 4,
+          "ops_in_window": 923320,
+          "throughput": 5060.631905285005,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 46166,
+              "mean": 0.0005286030514061124,
+              "p50": 0.000493779500175151,
+              "p95": 0.0008888794991435134,
+              "p99": 0.0009953994496754597,
+              "max": 0.04321888600134116
+            }
+          },
+          "ops_in_window_sampled": 46166,
+          "throughput_sampled": 253.03159526425023,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n10"
+      },
+      {
+        "node": "n11",
+        "branches": 4,
+        "procs": 5,
+        "num_processes": 5,
+        "elapsed_time": 182.4513442516327,
+        "background": {
+          "operation": "MIXED",
+          "clients": 4,
+          "ops_in_window": 924000,
+          "throughput": 5064.363892686044,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 46200,
+              "mean": 0.0005319867597873699,
+              "p50": 0.0004975909996574046,
+              "p95": 0.000895977300206141,
+              "p99": 0.0010017301501648048,
+              "max": 0.06934783799988509
+            }
+          },
+          "ops_in_window_sampled": 46200,
+          "throughput_sampled": 253.2181946343022,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n11"
+      },
+      {
+        "node": "n12",
+        "branches": 4,
+        "procs": 5,
+        "num_processes": 5,
+        "elapsed_time": 182.45133471488953,
+        "background": {
+          "operation": "MIXED",
+          "clients": 4,
+          "ops_in_window": 918100,
+          "throughput": 5032.026767218138,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 45905,
+              "mean": 0.0005336195154754533,
+              "p50": 0.0004991969999537105,
+              "p95": 0.0008981296010460937,
+              "p99": 0.0010025713998038554,
+              "max": 0.06838705099835352
+            }
+          },
+          "ops_in_window_sampled": 45905,
+          "throughput_sampled": 251.6013383609069,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n12"
+      },
+      {
+        "node": "n13",
+        "branches": 4,
+        "procs": 5,
+        "num_processes": 5,
+        "elapsed_time": 182.45171189308167,
+        "background": {
+          "operation": "MIXED",
+          "clients": 4,
+          "ops_in_window": 903180,
+          "throughput": 4950.241302911269,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 45159,
+              "mean": 0.0005434885266241973,
+              "p50": 0.0005026709986850619,
+              "p95": 0.0008994009998787078,
+              "p99": 0.0010067298187277627,
+              "max": 0.042393114999867976
+            }
+          },
+          "ops_in_window_sampled": 45159,
+          "throughput_sampled": 247.51206514556344,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n13"
+      },
+      {
+        "node": "n14",
+        "branches": 4,
+        "procs": 5,
+        "num_processes": 5,
+        "elapsed_time": 182.45138144493103,
+        "background": {
+          "operation": "MIXED",
+          "clients": 4,
+          "ops_in_window": 914600,
+          "throughput": 5012.84228574642,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 45730,
+              "mean": 0.0005368288525726535,
+              "p50": 0.0004997195010219002,
+              "p95": 0.0008971292989372159,
+              "p99": 0.0010039960598987817,
+              "max": 0.07145719400068629
+            }
+          },
+          "ops_in_window_sampled": 45730,
+          "throughput_sampled": 250.642114287321,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n14"
+      },
+      {
+        "node": "n15",
+        "branches": 4,
+        "procs": 5,
+        "num_processes": 5,
+        "elapsed_time": 182.45204281806946,
+        "background": {
+          "operation": "MIXED",
+          "clients": 4,
+          "ops_in_window": 930820,
+          "throughput": 5101.7241880276415,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 46541,
+              "mean": 0.0005249002746586717,
+              "p50": 0.0004899610012216726,
+              "p95": 0.0008899069998733466,
+              "p99": 0.0009954647997801656,
+              "max": 0.039736721000736
+            }
+          },
+          "ops_in_window_sampled": 46541,
+          "throughput_sampled": 255.0862094013821,
+          "row_sample": 20
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n15"
+      }
+    ],
+    "background_ops_in_window": 14209420,
+    "background_failed": 0
+  }
+}

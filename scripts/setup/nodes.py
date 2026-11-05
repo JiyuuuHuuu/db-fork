@@ -218,17 +218,18 @@ WantedBy=multi-user.target
     # cpu_agent.py files any descendant of the pageserver under walredo first
     CPU_COMM_GROUPS = {"pageserver": "pageserver", "safekeeper": "safekeeper", "storcon": "storage_control",
                        "broker": "storage_broker", "compute_ctl": "compute_ctl", "computes": "postgres",
-                       "doltgres": "doltgres"}
+                       "doltgres": "doltgres", "copy": "pg_basebackup"}
 
-    def cpu_agent_service(self, node: Node, svc_dir: str) -> None:
+    def cpu_agent_service(self, node: Node, svc_dir: str, bind: str = "0.0.0.0") -> None:
         """One scripts/setup/cpu_agent.py unit per remote node, shared by Neon and Doltgres (they may share a node,
         and the runner's DBFORK_REMOTE_CPU expects ports.cpu_agent): sets server (+ clients when configured), every
         backend's process groups by name, the disk and the server's memory node. Service mode: no CSV. Left running
-        by `stop`, it is cheap and the other backend may use it."""
+        by `stop`, it is cheap and the other backend may use it. bind: the address it listens on (pgcopy: the node's
+        LAN address; the nodes' public interfaces face the internet)."""
         script = f"{svc_dir}/cpu_agent.py"
         self.rsync(node, str(Path(__file__).with_name("cpu_agent.py")), script)
         server = node.cpus_csv("server") or (f"node:{node.server_numa}" if node.server_numa else "all")
-        argv = ["python3", script, "--port", str(self.topo.ports["cpu_agent"]), "--bind", "0.0.0.0",
+        argv = ["python3", script, "--port", str(self.topo.ports["cpu_agent"]), "--bind", bind,
                 "--set", f"server={server}"]
         clients = node.cpus_csv("client") or (f"node:{node.client_numa}" if node.client_numa else "")
         if clients:

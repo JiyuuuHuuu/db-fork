@@ -1,0 +1,5 @@
+backend,kind,busy_branches,nodes,client_processes,ops_per_s,errors,p50_ms_opsweighted,p95_ms_opsweighted,client_cpu_cores,sum_server_node_cores,sum_server_proc_cores,sum_computes_proc_cores,sum_copy_proc_cores,seed_node_cores,per_node_ops_per_s
+pgcopy,point,4,4,4,9864,0,0.39,0.44,2.8,4.7,1.7,1.7,0.0,0.1,n1:2501 n2:2433 n3:2448 n4:2482
+pgcopy,range,4,4,4,4163,0,0.93,1.17,2.8,5.2,2.2,2.2,0.0,0.0,n1:1075 n2:1027 n3:1033 n4:1028
+pgcopy,insert,4,4,4,8781,0,0.41,0.59,1.6,3.0,0.8,0.8,0.0,0.0,n1:2161 n2:2189 n3:2231 n4:2200
+pgcopy,update,4,4,4,8046,0,0.45,0.64,1.6,3.0,1.2,1.2,0.0,0.0,n1:1832 n2:2151 n3:1890 n4:2173

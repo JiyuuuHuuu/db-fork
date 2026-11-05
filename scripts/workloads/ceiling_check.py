@@ -15,6 +15,11 @@ statements (heap prefix, then stock_pkey); purged at the end.
 Doltgres: a fresh database copied from the seed (the runner's helpers), branches rc_0..rc_{max(N)-1} of its main,
 one connection per branch to "<db>/rc_i" (experiment 7's client: psycopg AsyncClientCursor); the database is
 dropped at the end.
+pgcopy (experiment 13): a run root copied from the seed instance, then max(N) instances copied from it onto this
+node's agent (PGCOPY_LOCAL_AGENT; 16 at a time), each prewarmed like Neon's computes, connections on 127.0.0.1.
+Several nodes at once (scripts/workloads/multi_client/multi_scaling.py run-ceiling): --ns-local gives this node's
+share of each N in --ns, --sync-addr/--sync-prefix start every measurement on every node together (GO per kind and
+N from the coordinator), --no-purge leaves the other nodes' instances alone; rows carry busy_branches_total.
 
     uv run python scripts/workloads/ceiling_check.py --topology T --backend neon|doltgres \\
         [--ns 128,256,512,1024] [--kinds point,range,insert,update] [--seconds 30] [--procs MAX_PROCS] \\
@@ -72,6 +77,11 @@ class _Keys:
 
 async def _connect(backend, target, env):
     import psycopg
+    if backend == "pgcopy":
+        host, port = target
+        return await psycopg.AsyncConnection.connect(
+            host=host, port=port, dbname=env.get("PGCOPY_DB", "bench"), user=env.get("PGCOPY_PG_USER", "bench"),
+            password=env.get("PGCOPY_PG_PASSWORD", ""), autocommit=True)
     if backend == "neon":
         host, port = target
         return await psycopg.AsyncConnection.connect(
@@ -131,14 +141,30 @@ def server_cpu():
         return None
 
 
-def measure(backend, targets, kind, seconds, procs, w, W):
+def sync_go(addr, key):
+    """Wait for the coordinator's GO for key (multi-node ceiling: every node's measurement starts together)."""
+    import socket
+    host, port = addr.rsplit(":", 1)
+    with socket.create_connection((host, int(port)), timeout=60) as s:
+        s.sendall(f"{key}\n".encode())
+        s.settimeout(3600)
+        line = s.makefile("r").readline().strip()
+    if line != "GO":
+        raise RuntimeError(f"ceiling sync {key}: {line or 'coordinator closed the connection'}")
+
+
+def measure(backend, targets, kind, seconds, procs, w, W, sync=None):
     from microbench.runner2 import RemoteCpuSampler
     n = len(targets)
     nproc = min(procs, n)
     groups = [targets[i::nproc] for i in range(nproc)]
     ctx = mp.get_context("spawn")
     out = ctx.Queue()
-    start_at = time.time() + 5 + n / 50
+    if sync:
+        sync_go(*sync)    # then a common start, a few seconds out (clocks NTP-synchronised)
+        start_at = time.time() + 3 + 1024 / 50
+    else:
+        start_at = time.time() + 5 + n / 50
     env = dict(os.environ)
     ps = [ctx.Process(target=_proc, args=(backend, g, kind, seconds, start_at, out, w, 200_000 + 50_000_000 * j,
                                           W, env))
@@ -178,12 +204,13 @@ def measure(backend, targets, kind, seconds, procs, w, W):
     return row
 
 
-def neon_prewarm(target, stmts):
+def neon_prewarm(target, stmts, prefix="NEON_LOCAL"):
     import psycopg2
     host, port = target
-    c = psycopg2.connect(host=host, port=port, dbname=os.environ.get("NEON_LOCAL_DB", "bench"),
-                         user=os.environ.get("NEON_LOCAL_PG_USER", "bench"),
-                         password=os.environ.get("NEON_LOCAL_PG_PASSWORD", ""), connect_timeout=60)
+    db = os.environ.get(f"{prefix}_DB", "bench")
+    c = psycopg2.connect(host=host, port=port, dbname=db,
+                         user=os.environ.get(f"{prefix}_PG_USER", "bench"),
+                         password=os.environ.get(f"{prefix}_PG_PASSWORD", ""), connect_timeout=60)
     c.autocommit = True
     with c.cursor() as cur:
         for s in stmts:
@@ -207,8 +234,12 @@ def dolt_branches(n, create):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--topology", required=True)
-    ap.add_argument("--backend", required=True, choices=["neon", "doltgres"])
+    ap.add_argument("--backend", required=True, choices=["neon", "doltgres", "pgcopy"])
     ap.add_argument("--ns", default="128,256,512,1024")
+    ap.add_argument("--ns-local", default="", help="pgcopy, several nodes: this node's share of each N in --ns")
+    ap.add_argument("--sync-addr", default="", help="coordinator host:port (several nodes)")
+    ap.add_argument("--sync-prefix", default="", help="key prefix: GO per <prefix>.<kind>.<N>")
+    ap.add_argument("--no-purge", action="store_true", help="pgcopy: keep the other nodes' instances (several nodes)")
     ap.add_argument("--kinds", default="point,range,insert,update")
     ap.add_argument("--seconds", type=float, default=30)
     ap.add_argument("--procs", type=int, help="client processes at most (default: the topology's MAX_PROCS)")
@@ -223,10 +254,14 @@ def main():
         raise SystemExit("--out or --outdir is required")
     out = Path(args.out) if args.out else out_root(args.outdir, args.backend, "scaling_data", False) / "ceiling_check.csv"
     ns = [int(x) for x in args.ns.split(",")]
+    ns_local = [int(x) for x in args.ns_local.split(",")] if args.ns_local else list(ns)
+    if len(ns_local) != len(ns):
+        raise SystemExit("--ns-local needs one share per --ns entry")
+    sync = (args.sync_addr, args.sync_prefix) if args.sync_addr else None
     kinds = args.kinds.split(",")
     blocks = int(v["PREWARM_HEAP_BLOCKS"])
     stmts = ["SET maintenance_io_concurrency = 128", f"SELECT pg_prewarm('stock', 'buffer', 'main', 0, {blocks - 1})",
-             "SELECT pg_prewarm('stock_pkey')"] if args.backend == "neon" else []
+             "SELECT pg_prewarm('stock_pkey')"] if args.backend in ("neon", "pgcopy") else []
     opts = neon_compute_opts(int(v["LFC_MB"]), statement_log=False, pgdata_on_disk=True) if args.backend == "neon" else {}
     print(f"ceiling check ({args.backend}): W={W} ns={ns} kinds={kinds} seconds={args.seconds} procs<={procs} "
           f"compute_opts={opts} prewarm={len(stmts)} statements out={out}", flush=True)
@@ -234,7 +269,33 @@ def main():
         return
     out.parent.mkdir(parents=True, exist_ok=True)
     rows = []
-    if args.backend == "neon":
+    if args.backend == "pgcopy":
+        from dblib import pgcopy as pc
+        os.environ["PGCOPY_INSTANCE_OPTS"] = json.dumps({"statement_log": False})
+        if args.no_purge:
+            root = pc.new_run("ceiling")
+            pc.create_run_root(root)
+        else:
+            pc.setup_run("ceiling")
+        try:
+            k = max(ns_local)
+            names = [f"cc_{i}" for i in range(k)]
+            t0 = time.time()
+            agent = pc.local_agent()
+            with ThreadPoolExecutor(16) as ex:
+                made = list(ex.map(lambda nm: pc.create_instance(pc.instance_id_for(nm), pc.instance_id_for("main"),
+                                                                 agent=agent or None), names))
+            targets = [(pc.connect_host(r["agent"], r["host"]), int(r["port"])) for r in made]
+            print(f"{len(targets)} instances ready in {time.time() - t0:.0f}s", flush=True)
+            t0 = time.time()
+            with ThreadPoolExecutor(32) as ex:
+                list(ex.map(lambda t: neon_prewarm(t, stmts, "PGCOPY"), targets))
+            print(f"prewarmed {len(targets)} instances in {time.time() - t0:.0f}s", flush=True)
+            rows = sweep("pgcopy", targets, kinds, ns, args.seconds, procs, W, ns_local=ns_local, sync=sync)
+        finally:
+            if not args.no_purge:
+                pc.teardown_run("ceiling")
+    elif args.backend == "neon":
         os.environ["NEON_LOCAL_COMPUTE_OPTS"] = json.dumps(opts)
         from dblib import neon_local as nl
         nl.setup_run("ceiling")
@@ -270,13 +331,18 @@ def main():
         print("wrote", out)
 
 
-def sweep(backend, targets, kinds, ns, seconds, procs, W):
+def sweep(backend, targets, kinds, ns, seconds, procs, W, ns_local=None, sync=None):
     rows = []
     w = W
     for kind in kinds:
-        for n in ns:
+        for j, n in enumerate(ns):
             w += 1
-            r = measure(backend, targets[:n], kind, seconds, procs, w, W)
+            k = ns_local[j] if ns_local else n
+            if k == 0:   # no share of this N on this node (several nodes): not part of the measurement
+                continue
+            key = (sync[0], f"{sync[1]}.{kind}.{n}") if sync else None
+            r = measure(backend, targets[:k], kind, seconds, procs, w, W, sync=key)
+            r["busy_branches_total"] = n
             print(r, flush=True)
             rows.append(r)
     return rows

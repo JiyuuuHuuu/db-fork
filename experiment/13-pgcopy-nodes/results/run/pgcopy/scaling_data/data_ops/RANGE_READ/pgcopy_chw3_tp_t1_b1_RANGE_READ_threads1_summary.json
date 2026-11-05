@@ -1,0 +1,142 @@
+{
+  "run_id": "pgcopy_chw3_tp_t1_b1",
+  "backend": "PGCOPY",
+  "operation": "RANGE_READ",
+  "num_ops": 2500,
+  "num_threads": 1,
+  "num_branches": 1,
+  "execution_mode": "sync",
+  "concurrent_requests": 1,
+  "scale_factor": 1,
+  "intended_ops": 2500,
+  "total_ops": 2500,
+  "failed_ops": 0,
+  "elapsed_time": 3.3302626609802246,
+  "wall_time": 5.144125938415527,
+  "throughput": 750.6915383257349,
+  "data_ops_count": 2500,
+  "data_ops_time": 2.5643331410165047,
+  "data_throughput": 974.9123310121075,
+  "loaded_branches": 1,
+  "num_processes": 1,
+  "server_cpu_cores": null,
+  "client_cpu_cores": 0.6108656304608759,
+  "remote_cpu": {
+    "server": {
+      "ncpu": 20,
+      "samples": 6,
+      "proc_cores": 0.3854305180252263,
+      "node_cores": 1.0368718312813567,
+      "node_iowait_cores": 0.0,
+      "disk_util": 0.02202545634428263,
+      "disk_reads_per_s": 0.0,
+      "disk_writes_per_s": 22.922407775242316,
+      "disk_read_bytes_per_s": 0.0,
+      "disk_write_bytes_per_s": 207305.1539236379
+    },
+    "computes": {
+      "ncpu": 20,
+      "samples": 6,
+      "proc_cores": 0.3854263256595368,
+      "node_cores": null,
+      "node_iowait_cores": null,
+      "disk_util": null,
+      "disk_reads_per_s": null,
+      "disk_writes_per_s": null,
+      "disk_read_bytes_per_s": null,
+      "disk_write_bytes_per_s": null
+    },
+    "copy": {
+      "ncpu": 20,
+      "samples": 6,
+      "proc_cores": 0.0,
+      "node_cores": null,
+      "node_iowait_cores": null,
+      "disk_util": null,
+      "disk_reads_per_s": null,
+      "disk_writes_per_s": null,
+      "disk_read_bytes_per_s": null,
+      "disk_write_bytes_per_s": null
+    },
+    "seed": {
+      "ncpu": 20,
+      "samples": 6,
+      "proc_cores": 0.0,
+      "node_cores": 0.046597722164174155,
+      "node_iowait_cores": 0.0,
+      "disk_util": 0.0006831198279145114,
+      "disk_reads_per_s": 0.0,
+      "disk_writes_per_s": 0.34155991395964536,
+      "disk_read_bytes_per_s": 0.0,
+      "disk_write_bytes_per_s": 65054.86745187295
+    }
+  },
+  "background": null,
+  "latency": {
+    "ops": {
+      "n": 2500,
+      "mean": 0.0011443807400020886,
+      "p50": 0.0012026245003653457,
+      "p95": 0.0012454596496809245,
+      "p99": 0.0015243855098287895,
+      "max": 0.013395867000326689
+    },
+    "statements": {
+      "n": 2500,
+      "mean": 0.001025733256406602,
+      "p50": 0.0010719704996517976,
+      "p95": 0.001111772000513156,
+      "p99": 0.0012636445702173516,
+      "max": 0.013238999999884982
+    }
+  },
+  "data_source": {
+    "source": "generated",
+    "scale_factor": 3,
+    "rows": {},
+    "seed_db": "bench",
+    "seed_db_created": false,
+    "seed_sec": 0.0
+  },
+  "support": {
+    "workflow_supported": true,
+    "unsupported_ops": [],
+    "op_status_counts": {
+      "READ": {
+        "ok": 2500,
+        "unsupported": 0,
+        "failed": 0
+      },
+      "EXEC": {
+        "ok": 2500,
+        "unsupported": 0,
+        "failed": 0
+      }
+    }
+  },
+  "backend_observations": {
+    "forks": 1,
+    "fork_copy_ms": 612.6916408538818,
+    "fork_start_ms": 1009.6657276153564,
+    "fork_bytes": 336237094
+  },
+  "multi_client": {
+    "go_time": 1793870882.488022,
+    "window_from": "GO",
+    "remote_cpu_from": "n1",
+    "nodes": [
+      {
+        "node": "n1",
+        "branches": 1,
+        "procs": 1,
+        "num_processes": 1,
+        "total_ops": 2500,
+        "failed_ops": 0,
+        "elapsed_time": 3.3302626609802246,
+        "throughput": 750.6915383257349,
+        "client_cpu_cores": 0.6108656304608759,
+        "summary": "data_ops/RANGE_READ/n1/pgcopy_chw3_tp_t1_b1_RANGE_READ_threads1_summary.json"
+      }
+    ]
+  }
+}

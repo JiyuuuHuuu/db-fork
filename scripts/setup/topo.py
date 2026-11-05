@@ -18,6 +18,11 @@ Addresses: a role on the same host as the viewer is reached on a Unix socket (Ne
 on another host in the same zone on its LAN address; in another zone on its public address (CloudLab LANs of
 different sites do not route to each other).
 
+pgcopy (experiment 13): a seed node (the seed instance and every run root) and host nodes (branch instances, each
+with its benchmark client: co-located). Its agents and instances listen on LAN addresses only, so its addresses are
+always LAN addresses, also from the node itself (no loopback; the client connects to its own instances on
+127.0.0.1 through dblib/pgcopy.py).
+
 Neon transport "rdma" (experiment 12): every service-to-service Postgres-protocol connection (GetPage, WAL push, WAL
 pull, basebackup) runs over an RDMA byte stream: listeners `rdma:0.0.0.0:<port>`, peers `rdma:<ip>:<port>`. RDMA has
 no loopback device, so a role on the viewer's own host is reached on the host's LAN address. HTTP endpoints stay TCP
@@ -38,6 +43,7 @@ LOCAL = "local"
 PORT_DEFAULTS = {  # experiment 5's ports
     "storcon": 1234, "storcon_pg": 1235, "broker": 50051, "hook": 9999, "ps_http": 9898, "ps_pg": 64000,
     "sk_pg": 5454, "sk_http": 7676, "agent": 9000, "cpu_agent": 9010, "doltgres": 5433,
+    "pgcopy_agent": 9100, "pgcopy_pg": 24000,
 }
 
 WORKLOAD_DEFAULTS = {  # experiment 8's (the user's defaults since 3 Nov 2026; experiment 5 used W=4, prewarm 3400)
@@ -191,10 +197,13 @@ class Topo:
         self.nodes = {n: Node(n, d, self) for n, d in nodes.items()}
         self.neon = r.get("neon")
         self.doltgres = r.get("doltgres")
+        self.pgcopy = r.get("pgcopy")
         if self.neon:
             self._check_neon()
         if self.doltgres:
             self._check_doltgres()
+        if self.pgcopy:
+            self._check_pgcopy()
 
     # ---- validation ----
     def node(self, name: str) -> Node:
@@ -251,6 +260,56 @@ class Topo:
             self.node(d[r])
         d.setdefault("version", "1.4.0")
 
+    def _check_pgcopy(self) -> None:
+        p = self.pgcopy
+        if "seed" not in p:
+            raise TopoError("[pgcopy] needs seed = <node>")
+        self.node(p["seed"])
+        if not p.get("hosts"):
+            raise TopoError("[pgcopy] needs hosts = [<node>, ...]")
+        for x in p["hosts"]:
+            self.node(x)
+        if len(set(p["hosts"])) != len(p["hosts"]):
+            raise TopoError("[pgcopy] hosts must be distinct")
+        if p["seed"] in p["hosts"]:
+            raise TopoError("[pgcopy] the seed node cannot also be a host (a branch there would be a local copy)")
+        p.setdefault("client", p["hosts"][0])
+        if p["client"] not in p["hosts"]:
+            raise TopoError("[pgcopy] client must be one of the hosts (clients are co-located with their branches)")
+        p.setdefault("pg_version", 17)
+        for x in [p["seed"], *p["hosts"]]:
+            nd = self.node(x)
+            if nd.local or nd.lan in (None, "127.0.0.1", "localhost"):
+                raise TopoError(f"[pgcopy] node {x} needs a real 'lan' address (agents listen on the LAN only)")
+
+    def pgcopy_nodes(self) -> list[Node]:
+        p = self.pgcopy
+        return [self.node(x) for x in dict.fromkeys([p["seed"], *p["hosts"]])]
+
+    def pgcopy_root(self, node: Node) -> str:
+        return node.d.get("pgcopy_root", f"{node.data_root}/pgcopy")
+
+    def pgcopy_agent_url(self, node: Node) -> str:
+        return f"http://{node.lan}:{self.ports['pgcopy_agent']}"
+
+    def pgcopy_env(self, viewer_name: str | None = None, seeding: bool = False) -> dict:
+        """PGCOPY_* (+ DBFORK_REMOTE_CPU) for a runner on `viewer` (default: the client). Agents by LAN address."""
+        p = self.pgcopy
+        viewer = self.node(viewer_name or p["client"])
+        w = self.wl("pgcopy")
+        env = {
+            "PGCOPY_AGENTS": ",".join(self.pgcopy_agent_url(self.node(x)) for x in p["hosts"]),
+            "PGCOPY_ROOT_AGENT": self.pgcopy_agent_url(self.node(p["seed"])),
+            "PGCOPY_LOCAL_AGENT": self.pgcopy_agent_url(viewer) if viewer.name in p["hosts"] else "",
+            "PGCOPY_SEED_INSTANCE": "seed",
+            "PGCOPY_PG_USER": "bench",
+            "PGCOPY_PG_PASSWORD": "bench",
+            "PGCOPY_DB": "bench",
+            "PGCOPY_SHARED_BUFFERS": w["seed_shared_buffers"] if seeding else w["shared_buffers"],
+            "DBFORK_REMOTE_CPU": "" if seeding else self.remote_cpu("pgcopy", viewer),
+        }
+        return env
+
     # ---- roles ----
     def neon_nodes(self) -> list[str]:
         n = self.neon
@@ -259,8 +318,11 @@ class Topo:
             out += n[r]
         return list(dict.fromkeys(out))
 
+    def section(self, backend: str | None) -> dict | None:
+        return {"neon": self.neon, "doltgres": self.doltgres, "pgcopy": self.pgcopy}.get(backend or "")
+
     def role_node(self, backend: str, role: str) -> Node:
-        sec = self.neon if backend == "neon" else self.doltgres
+        sec = self.section(backend)
         if not sec:
             raise TopoError(f"topology has no [{backend}] section")
         return self.node(sec[role])
@@ -270,7 +332,7 @@ class Topo:
 
     def wl(self, backend: str | None) -> dict:
         """Workload parameters: [workload], overridden by [neon.workload] / [doltgres.workload]."""
-        sec = (self.neon if backend == "neon" else self.doltgres if backend == "doltgres" else None) or {}
+        sec = self.section(backend) or {}
         over = sec.get("workload", {})
         unknown = set(over) - set(WORKLOAD_DEFAULTS)
         if unknown:
@@ -398,6 +460,8 @@ class Topo:
 
     # ---- CPU sampling (scripts/setup/cpu_agent.py on every server node) ----
     def server_nodes(self, backend: str) -> list[Node]:
+        if backend == "pgcopy":
+            return self.pgcopy_nodes()
         if backend == "neon":
             n = self.neon
             other_roles = [n[r] for r in NEON_ROLES_ONE if r != "client"] + sum((n[r] for r in NEON_ROLES_MANY), [])
@@ -408,6 +472,17 @@ class Topo:
         """DBFORK_REMOTE_CPU for runner2's RemoteCpuSampler: label=url;... One label per server node ('server'
         when there is one, else the node name), plus per-group labels of the single-host Neon deployment."""
         port = self.ports["cpu_agent"]
+        if backend == "pgcopy":
+            # the viewer's own node (its instances and its clients) and the seed node (every copy reads from it);
+            # LAN addresses: the CPU agents listen on the LAN only. Groups: postgres processes, pg_basebackup.
+            p = self.pgcopy
+            seed = self.node(p["seed"])
+            out = []
+            if viewer.name in p["hosts"]:
+                base = f"http://{viewer.lan}:{port}/cpu"
+                out += [f"server={base}?set=server", f"computes={base}?group=computes", f"copy={base}?group=copy"]
+            out.append(f"seed=http://{seed.lan}:{port}/cpu?set=server")
+            return ";".join(out)
         nodes = self.server_nodes(backend)
         out = []
         for nd in nodes:
@@ -442,22 +517,28 @@ class Topo:
         }
         if backend:
             c = self.client(backend)
-            srv = (self.node(self.neon["storcon"]) if backend == "neon" else self.node(self.doltgres["server"]))
+            srv = (self.node(self.neon["storcon"]) if backend == "neon" else
+                   c if backend == "pgcopy" else self.node(self.doltgres["server"]))
             v.update({
                 "BACKEND": backend,
                 "CLIENT_NODE": c.name, "CLIENT_HOST": c.host, "CLIENT_IS_LOCAL": int(c.is_here()),
                 "CLIENT_CPUS": c.cpus_csv("client"), "CLIENT_MEM": c.client_mem, "CLIENT_NUMA": c.client_numa,
                 "SERVER_NODE": srv.name, "SERVER_CPUS": srv.cpus_csv("server"), "SERVER_MEM": srv.server_mem,
                 "SERVER_NUMA": srv.server_numa,
-                "SERVER_SAME_HOST": int(srv.host == c.host),
+                # pgcopy: the instances share the client's node, but there is no single server process to watch
+                # (no DBFORK_SERVER_PID, no per-run CPU agent): the node's CPU agent runs as a service
+                "SERVER_SAME_HOST": 0 if backend == "pgcopy" else int(srv.host == c.host),
                 "MAX_PROCS": self.max_procs(backend),
                 "ENV_FILE": f"{self.state_dir}/{backend}.env",
-                "SEED_DB": "bench" if backend == "neon" else f"ch_w{w['W']}_seed",
-                "RUNNER_BACKEND": "neon_local" if backend == "neon" else "dolt",
+                "SEED_DB": "bench" if backend in ("neon", "pgcopy") else f"ch_w{w['W']}_seed",
+                "RUNNER_BACKEND": {"neon": "neon_local", "pgcopy": "pgcopy"}.get(backend, "dolt"),
             })
             if backend == "neon":
                 v["NEON_RUN_DIR"] = self.neon_run_dir()
                 v["NEON_TRANSPORT"] = self.neon["transport"]
+            if backend == "pgcopy":
+                v["PGCOPY_HOSTS"] = ",".join(self.pgcopy["hosts"])
+                v["PGCOPY_SEED_NODE"] = self.pgcopy["seed"]
         return v
 
 
@@ -479,6 +560,8 @@ def write_env(topo: Topo, backend: str, view: str | None = None, out: str | None
               seeding: bool = False) -> Path:
     if backend == "neon":
         env = topo.neon_env(view, read_seed(topo, "neon"), seeding=seeding)
+    elif backend == "pgcopy":
+        env = topo.pgcopy_env(view, seeding=seeding)
     else:
         env = topo.doltgres_env(view)
     path = Path(out or f"{topo.state_dir}/{backend}.env")
@@ -493,7 +576,7 @@ def get_key(topo: Topo, key: str):
     cur = topo.raw
     if key.startswith("workload."):
         return topo.workload[key.split(".", 1)[1]]
-    for b in ("neon", "doltgres"):
+    for b in ("neon", "doltgres", "pgcopy"):
         if key.startswith(f"{b}.workload."):
             return topo.wl(b)[key.split(".", 2)[2]]
     if key.startswith("ports."):
@@ -509,10 +592,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("check"); p.add_argument("topo")
-    p = sub.add_parser("shell"); p.add_argument("topo"); p.add_argument("--backend", choices=["neon", "doltgres"])
+    p = sub.add_parser("shell"); p.add_argument("topo"); p.add_argument("--backend", choices=["neon", "doltgres", "pgcopy"])
     p = sub.add_parser("get"); p.add_argument("topo"); p.add_argument("key")
     p = sub.add_parser("env"); p.add_argument("topo"); p.add_argument("--backend", required=True,
-                                                                    choices=["neon", "doltgres"])
+                                                                    choices=["neon", "doltgres", "pgcopy"])
     p.add_argument("--view"); p.add_argument("--out"); p.add_argument("--seeding", action="store_true")
     a = ap.parse_args(argv)
     try:
@@ -529,6 +612,10 @@ def main(argv=None) -> int:
             if t.doltgres:
                 print(f"  doltgres {t.doltgres['version']}: server={t.doltgres['server']} "
                       f"client={t.doltgres['client']}")
+            if t.pgcopy:
+                p = t.pgcopy
+                print(f"  pgcopy (PostgreSQL {p['pg_version']}): seed={p['seed']} client={p['client']} "
+                      f"hosts={p['hosts']}")
             print(f"  workload: W={t.workload['W']} SB={t.workload['shared_buffers']} LFC={t.workload['lfc_mb']}MB "
                   f"ns_data={t.workload['ns_data']} ns_branch={t.workload['ns_branch']}")
         elif a.cmd == "shell":

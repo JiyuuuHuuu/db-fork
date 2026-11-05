@@ -1,0 +1,186 @@
+{
+  "run_id": "pgcopy_chw3_tp_t1_b1",
+  "backend": "PGCOPY",
+  "operation": "BRANCH_CREATE",
+  "num_ops": 10,
+  "num_threads": 1,
+  "num_branches": 1,
+  "execution_mode": "sync",
+  "concurrent_requests": 1,
+  "scale_factor": 1,
+  "intended_ops": 10,
+  "total_ops": 12,
+  "failed_ops": 0,
+  "elapsed_time": 16.328731775283813,
+  "wall_time": 22.141496181488037,
+  "throughput": 0.7349009197495636,
+  "data_ops_count": 0,
+  "data_ops_time": 0,
+  "data_throughput": 0,
+  "loaded_branches": 1,
+  "num_processes": 2,
+  "server_cpu_cores": null,
+  "client_cpu_cores": null,
+  "remote_cpu": {
+    "server": {
+      "ncpu": 20,
+      "samples": 22,
+      "proc_cores": 0.40814945244852874,
+      "node_cores": 1.2595919576905368,
+      "node_iowait_cores": 1.1234287428760352,
+      "disk_util": 0.9053124846338335,
+      "disk_reads_per_s": 0.0,
+      "disk_writes_per_s": 1232.275166068361,
+      "disk_read_bytes_per_s": 0.0,
+      "disk_write_bytes_per_s": 240935359.43566597
+    },
+    "computes": {
+      "ncpu": 20,
+      "samples": 22,
+      "proc_cores": 0.2903780870427409,
+      "node_cores": null,
+      "node_iowait_cores": null,
+      "disk_util": null,
+      "disk_reads_per_s": null,
+      "disk_writes_per_s": null,
+      "disk_read_bytes_per_s": null,
+      "disk_write_bytes_per_s": null
+    },
+    "copy": {
+      "ncpu": 20,
+      "samples": 22,
+      "proc_cores": 0.11778061624535208,
+      "node_cores": null,
+      "node_iowait_cores": null,
+      "disk_util": null,
+      "disk_reads_per_s": null,
+      "disk_writes_per_s": null,
+      "disk_read_bytes_per_s": null,
+      "disk_write_bytes_per_s": null
+    },
+    "seed": {
+      "ncpu": 20,
+      "samples": 22,
+      "proc_cores": 0.001224834866249029,
+      "node_cores": 0.03831833374086733,
+      "node_iowait_cores": 0.002449669732499799,
+      "disk_util": 0.003315114800028379,
+      "disk_reads_per_s": 0.0,
+      "disk_writes_per_s": 1.4125904267640008,
+      "disk_read_bytes_per_s": 0.0,
+      "disk_write_bytes_per_s": 1043777.7977333582
+    }
+  },
+  "background": {
+    "operation": "MIXED",
+    "clients": 1,
+    "ops_in_window": 8782,
+    "throughput": 537.8249897700557,
+    "failed": 0,
+    "first_error": null,
+    "latency": {
+      "statements": {
+        "n": 8782,
+        "mean": 0.0015608328629120687,
+        "p50": 0.00048554049999438575,
+        "p95": 0.0011259420997248506,
+        "p99": 0.041574927499959946,
+        "max": 0.11732689200016466
+      }
+    }
+  },
+  "latency": {
+    "ops": {
+      "n": 12,
+      "mean": 1.3538888869998875,
+      "p50": 1.611206466999647,
+      "p95": 1.6927582927497042,
+      "p99": 1.7299893657495977,
+      "max": 1.739297133999571
+    },
+    "statements": {
+      "n": 0
+    }
+  },
+  "data_source": {
+    "source": "generated",
+    "scale_factor": 3,
+    "rows": {},
+    "seed_db": "bench",
+    "seed_db_created": false,
+    "seed_sec": 0.0
+  },
+  "support": {
+    "workflow_supported": true,
+    "unsupported_ops": [],
+    "op_status_counts": {
+      "BRANCH": {
+        "ok": 10,
+        "unsupported": 0,
+        "failed": 0
+      },
+      "CONNECT": {
+        "ok": 2,
+        "unsupported": 0,
+        "failed": 0
+      },
+      "EXEC": {
+        "ok": 10884,
+        "unsupported": 0,
+        "failed": 0
+      },
+      "READ": {
+        "ok": 8632,
+        "unsupported": 0,
+        "failed": 0
+      },
+      "UPDATE": {
+        "ok": 2250,
+        "unsupported": 0,
+        "failed": 0
+      }
+    }
+  },
+  "backend_observations": {
+    "forks": 1,
+    "fork_copy_ms": 609.4911098480225,
+    "fork_start_ms": 989.5339012145996,
+    "fork_bytes": 336237094
+  },
+  "multi_client": {
+    "go_time": 1793870302.7654107,
+    "creator": "n1",
+    "remote_cpu_from": "n1",
+    "nodes": [
+      {
+        "node": "n1",
+        "branches": 1,
+        "procs": 2,
+        "num_processes": 2,
+        "elapsed_time": 16.328731775283813,
+        "background": {
+          "operation": "MIXED",
+          "clients": 1,
+          "ops_in_window": 8782,
+          "throughput": 537.8249897700557,
+          "failed": 0,
+          "first_error": null,
+          "latency": {
+            "statements": {
+              "n": 8782,
+              "mean": 0.0015608328629120687,
+              "p50": 0.00048554049999438575,
+              "p95": 0.0011259420997248506,
+              "p99": 0.041574927499959946,
+              "max": 0.11732689200016466
+            }
+          }
+        },
+        "client_cpu_cores": null,
+        "summary": "branch_create/mixed/n1"
+      }
+    ],
+    "background_ops_in_window": 8782,
+    "background_failed": 0
+  }
+}

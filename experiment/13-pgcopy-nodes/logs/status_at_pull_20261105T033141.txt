@@ -1,0 +1,32 @@
+http://10.10.1.1:9100: 16 instances (16 running), data 4.76 GiB, wal 12.66 GiB, mem avail 60.4 GiB, disk free 332 GB
+http://10.10.1.2:9100: 69 instances (69 running), data 20.55 GiB, wal 12.66 GiB, mem avail 56.9 GiB, disk free 313 GB
+http://10.10.1.3:9100: 69 instances (69 running), data 20.55 GiB, wal 16.22 GiB, mem avail 56.9 GiB, disk free 312 GB
+http://10.10.1.4:9100: 69 instances (69 running), data 20.55 GiB, wal 15.47 GiB, mem avail 56.6 GiB, disk free 313 GB
+http://10.10.1.5:9100: 69 instances (69 running), data 20.55 GiB, wal 13.81 GiB, mem avail 57.0 GiB, disk free 315 GB
+http://10.10.1.6:9100: 68 instances (68 running), data 20.25 GiB, wal 14.72 GiB, mem avail 57.0 GiB, disk free 314 GB
+http://10.10.1.7:9100: 68 instances (68 running), data 20.25 GiB, wal 13.75 GiB, mem avail 57.1 GiB, disk free 315 GB
+http://10.10.1.8:9100: 68 instances (68 running), data 20.25 GiB, wal 13.55 GiB, mem avail 57.0 GiB, disk free 315 GB
+http://10.10.1.9:9100: 68 instances (68 running), data 20.25 GiB, wal 15.48 GiB, mem avail 57.0 GiB, disk free 313 GB
+http://10.10.1.10:9100: 68 instances (68 running), data 20.25 GiB, wal 14.38 GiB, mem avail 57.0 GiB, disk free 314 GB
+http://10.10.1.11:9100: 68 instances (68 running), data 20.25 GiB, wal 14.03 GiB, mem avail 57.0 GiB, disk free 315 GB
+http://10.10.1.12:9100: 68 instances (68 running), data 20.25 GiB, wal 15.70 GiB, mem avail 57.1 GiB, disk free 313 GB
+http://10.10.1.13:9100: 68 instances (68 running), data 20.25 GiB, wal 13.77 GiB, mem avail 57.0 GiB, disk free 315 GB
+http://10.10.1.14:9100: 68 instances (68 running), data 20.25 GiB, wal 15.61 GiB, mem avail 57.1 GiB, disk free 313 GB
+http://10.10.1.15:9100: 68 instances (68 running), data 20.25 GiB, wal 14.27 GiB, mem avail 57.1 GiB, disk free 314 GB
+http://10.10.1.16:9100: 68 instances (68 running), data 20.25 GiB, wal 15.64 GiB, mem avail 57.0 GiB, disk free 313 GB
+n0: agent active, cpu active, 96 postgres processes,  332G free
+n1: agent active, cpu active, 423 postgres processes,  314G free
+n2: agent active, cpu active, 423 postgres processes,  313G free
+n3: agent active, cpu active, 423 postgres processes,  313G free
+n4: agent active, cpu active, 423 postgres processes,  315G free
+n5: agent active, cpu active, 417 postgres processes,  315G free
+n6: agent active, cpu active, 417 postgres processes,  315G free
+n7: agent active, cpu active, 417 postgres processes,  316G free
+n8: agent active, cpu active, 417 postgres processes,  314G free
+n9: agent active, cpu active, 416 postgres processes,  315G free
+n10: agent active, cpu active, 416 postgres processes,  315G free
+n11: agent active, cpu active, 416 postgres processes,  314G free
+n12: agent active, cpu active, 416 postgres processes,  315G free
+n13: agent active, cpu active, 416 postgres processes,  314G free
+n14: agent active, cpu active, 416 postgres processes,  315G free
+n15: agent active, cpu active, 416 postgres processes,  314G free
