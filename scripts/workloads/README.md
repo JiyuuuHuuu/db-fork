@@ -9,12 +9,14 @@ All measurement goes through the shared code, unchanged: `scripts/run_throughput
 `microbench/runner2.py`, which uses `dblib/neon_local.py` or `dblib/dolt.py`. The cold start and the ceiling check
 are small dedicated clients, as they were in experiments 5 and 7.
 
-Every parameter comes from the topology. The defaults are experiment 5's (`WORKLOAD_DEFAULTS` in
+Every parameter comes from the topology. The defaults are experiment 5's with experiment 8's dataset (`WORKLOAD_DEFAULTS` in
 `scripts/setup/topo.py`), and `[workload]`, `[neon.workload]` or `[doltgres.workload]` override them:
 
-- W = 4 warehouses.
+- W = 3 warehouses (experiment 8's dataset; experiment 5 used W = 4).
 - Neon compute: shared_buffers 8 MB, LFC 36 MB, LFC chunk 1 page.
-- Prewarm: 3,400 heap pages first, then `stock_pkey`.
+- Prewarm: 3,674 heap pages first, then `stock_pkey`. With W = 3 the LFC then holds 28% of the stock heap and
+  28.6% of point reads are served by the compute's caches at low load (experiment 8). The earlier W = 4 setting
+  (LFC about 20% of the heap) is no longer used.
 - Table `stock`, with 100 untimed updates per setup branch.
 - 10% of each run is an untimed warm-up.
 - N for the data workloads: 1, 4, 16, 64, 128, 256, 512, 1024. N for branch creation: 1 to 512.

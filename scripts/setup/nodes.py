@@ -193,6 +193,7 @@ User={user}
 ExecStart={wrapper}
 LimitNOFILE=1048576
 LimitNPROC=infinity
+LimitMEMLOCK=infinity
 TasksMax=infinity
 KillMode=control-group
 TimeoutStopSec=120

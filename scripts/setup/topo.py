@@ -17,6 +17,11 @@ placement and the backend's environment file.
 Addresses: a role on the same host as the viewer is reached on a Unix socket (Neon, transport "uds") or loopback;
 on another host in the same zone on its LAN address; in another zone on its public address (CloudLab LANs of
 different sites do not route to each other).
+
+Neon transport "rdma" (experiment 12): every service-to-service Postgres-protocol connection (GetPage, WAL push, WAL
+pull, basebackup) runs over an RDMA byte stream: listeners `rdma:0.0.0.0:<port>`, peers `rdma:<ip>:<port>`. RDMA has
+no loopback device, so a role on the viewer's own host is reached on the host's LAN address. HTTP endpoints stay TCP
+(the benchmark client and the agents use them).
 """
 from __future__ import annotations
 
@@ -35,13 +40,13 @@ PORT_DEFAULTS = {  # experiment 5's ports
     "sk_pg": 5454, "sk_http": 7676, "agent": 9000, "cpu_agent": 9010, "doltgres": 5433,
 }
 
-WORKLOAD_DEFAULTS = {  # experiment 5's (the user's defaults for later experiments)
-    "W": 4,                      # CH-benCHmark warehouses
+WORKLOAD_DEFAULTS = {  # experiment 8's (the user's defaults since 3 Nov 2026; experiment 5 used W=4, prewarm 3400)
+    "W": 3,                      # CH-benCHmark warehouses (experiment 8: the LFC then holds 28% of the stock heap)
     "shared_buffers": "8MB",     # compute shared_buffers
-    "lfc_mb": 36,                # compute local file cache, MB (25% of stock at W=4)
+    "lfc_mb": 36,                # compute local file cache, MB (28% of the stock heap at W=3 with the prewarm below)
     "lfc_chunk_pages": 1,        # LFC chunk in 8 kB pages (Neon's default 128 collapses the hit ratio)
     "eic": 2,                    # effective_io_concurrency
-    "prewarm_heap_blocks": 3400,  # stock heap pages prewarmed (heap first, then stock_pkey)
+    "prewarm_heap_blocks": 3674,  # stock heap pages prewarmed (heap first, then stock_pkey); 28.6% of point reads hit
     "seed_shared_buffers": "8GB",
     "storcon_rate_limit": 1000,
     "stripe_pages": 256,         # shard stripe for shard-split
@@ -212,11 +217,23 @@ class Topo:
             raise TopoError("[neon] safekeepers must be on distinct nodes (one safekeeper per node)")
         if len(set(n["pageservers"])) != len(n["pageservers"]):
             raise TopoError("[neon] pageservers must be on distinct nodes")
+        # safekeeper_groups = G (experiment 12, write phase): the safekeepers form G sets of equal size, in list
+        # order; each timeline's WAL goes to one set, chosen by the compute agent from the timeline id. Default 1.
+        g = n.setdefault("safekeeper_groups", 1)
+        if not isinstance(g, int) or g < 1 or len(n["safekeepers"]) % g:
+            raise TopoError(f"[neon] safekeeper_groups = {g!r} must divide the {len(n['safekeepers'])} safekeepers")
         n.setdefault("transport", "tcp")
-        if n["transport"] not in ("uds", "tcp"):
-            raise TopoError("[neon] transport must be 'uds' or 'tcp'")
+        if n["transport"] not in ("uds", "tcp", "rdma"):
+            raise TopoError("[neon] transport must be 'uds', 'tcp' or 'rdma'")
+        if n["transport"] == "rdma":
+            for x in self.neon_nodes():
+                nd = self.node(x)
+                if nd.lan in (None, "127.0.0.1", "localhost"):
+                    raise TopoError(f"[neon] transport 'rdma' needs a real 'lan' address on node {x} (RDMA has no "
+                                    "loopback device)")
         if n["transport"] == "uds":
-            if len(n["pageservers"]) != 1 or len(n["safekeepers"]) != 1 or len(n["compute_agents"]) != 1:
+            if (len(n["pageservers"]) != 1 or len(n["safekeepers"]) != 1 or len(n["compute_agents"]) != 1
+                    or n["safekeeper_groups"] != 1):
                 raise TopoError("[neon] transport 'uds' (one host) supports one pageserver, one safekeeper and "
                                 "one compute agent")
             hosts = {self.node(x).host for x in self.neon_nodes()}
@@ -272,6 +289,14 @@ class Topo:
     def uds(self) -> bool:
         return bool(self.neon) and self.neon["transport"] == "uds"
 
+    @property
+    def rdma(self) -> bool:
+        return bool(self.neon) and self.neon["transport"] == "rdma"
+
+    def rdma_host(self, node: Node, viewer: Node) -> str:
+        """IP of `node` for an RDMA connection from `viewer`: its LAN address on the same host (no loopback)."""
+        return node.lan if viewer.host == node.host else node.addr_from(viewer)
+
     def neon_run_dir(self) -> str:
         """Sockets and pid files of the single-host deployment (sun_path is limited to 108 bytes)."""
         return f"{self.node(self.neon['storcon']).neon_root}/run"
@@ -288,15 +313,36 @@ class Topo:
             return f"http+unix://{self.sock(name).encode().hex()}{path}"
         return f"http://{node.addr_from(viewer)}:{self.ports[port_key]}{path}"
 
+    def svc_url(self, name: str, port_key: str, node: Node, viewer: Node, path: str = "") -> str:
+        """A service-to-service HTTP/gRPC endpoint (broker, storage controller upcalls): http+rdma://<ip>:<port>
+        under rdma, else as http_url."""
+        if self.rdma:
+            return f"http+rdma://{self.rdma_host(node, viewer)}:{self.ports[port_key]}{path}"
+        return self.http_url(name, port_key, node, viewer, path)
+
+    def rdma_listen(self, port_key: str) -> str:
+        """The extra RDMA HTTP listener of a service under rdma (its TCP listener stays for the client)."""
+        return f"rdma:0.0.0.0:{self.ports[port_key]}"
+
     def pg_host(self, node: Node, viewer: Node) -> str:
-        """libpq host of a Neon pg listener (a socket directory under uds)."""
+        """libpq host of a Neon pg listener (a socket directory under uds, rdma:<ip> under rdma)."""
+        if self.rdma:
+            return "rdma:" + self.rdma_host(node, viewer)
         return self.neon_run_dir() if self.uds else node.addr_from(viewer)
 
     def listen(self, name: str, port_key: str, kind: str = "http") -> str:
         """What a Neon service binds: unix:<path> under uds, else all interfaces."""
         if self.uds:
             return "unix:" + (self.pg_sock(port_key) if kind == "pg" else self.sock(name))
+        if self.rdma and kind == "pg":
+            return f"rdma:0.0.0.0:{self.ports[port_key]}"
         return f"0.0.0.0:{self.ports[port_key]}"
+
+    def safekeeper_groups(self) -> list[list[str]]:
+        """The safekeeper node names in their [neon] safekeeper_groups sets (one set by default)."""
+        sks, g = self.neon["safekeepers"], self.neon.get("safekeeper_groups", 1)
+        k = len(sks) // g
+        return [sks[i * k:(i + 1) * k] for i in range(g)]
 
     def neon_env(self, viewer_name: str | None = None, seed: dict | None = None, seeding: bool = False) -> dict:
         """NEON_LOCAL_* (+ DBFORK_REMOTE_CPU) for a runner on `viewer` (default: the client node)."""

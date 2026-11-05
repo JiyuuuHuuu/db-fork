@@ -129,6 +129,65 @@ def bump_past_images(timeline_id: str) -> str:
     return body["last_record_lsn"]
 
 
+def compact_shards(timeline_id: str | None = None) -> dict:
+    """Experiment 12: after a shard split, each child shard reads the parent's layers until it compacts; the split
+    left the children with the parent's delta layers only (the seed's image layers were not in their layer maps:
+    every read rebuilt pages by WAL redo, at about twice the pageserver CPU per GetPage of the unsharded tenant).
+    Checkpoint and compact every shard of the seed timeline with forced image-layer creation on its own pageserver,
+    then write a little WAL through a sharded compute so that branches start above the new images (as
+    bump_past_images does unsharded). Returns {shard: layer kinds}."""
+    tl = timeline_id or nl.seed_timeline()
+    nodes = {n["id"]: n for n in storcon("GET", "/control/v1/node")}
+    shards = locate()["shards"]
+
+    def http_url(nd):
+        return f"http://{nd['listen_http_addr'].removeprefix('rdma:')}:{nd['listen_http_port']}"
+
+    image_lsn, kinds, urls = 0, {}, {}
+    for sh in shards:
+        nd = nodes[sh["node_id"]]
+        base = f"{http_url(nd)}/v1/tenant/{sh['shard_id']}/timeline/{tl}"
+        urls[sh["shard_id"]] = base
+        for path in ("/checkpoint", "/compact?force_image_layer_creation=true&force_l0_compaction=true"
+                                    "&force_repartition=true&wait_until_uploaded=true"):
+            st, body = nl.http("PUT", base + path, timeout=3600)
+            if st != 200:
+                raise RuntimeError(f"{sh['shard_id']} PUT {path}: HTTP {st} {body}")
+        st, body = nl.http("GET", base + "/layer")
+        k: dict = {}
+        for layer in body["historic_layers"]:
+            k[layer["kind"]] = k.get(layer["kind"], 0) + 1
+            if layer["kind"] == "Image":
+                image_lsn = max(image_lsn, lsn_int(layer["lsn_start"]))
+        kinds[sh["shard_id"]] = k
+    rdma = any(n["listen_http_addr"].startswith("rdma:") for n in nodes.values())
+    order = sorted(shards, key=lambda x: int(x["shard_id"].split("-")[1][:2], 16))
+    ps = [f"{'rdma:' if rdma else ''}{nodes[x['node_id']]['listen_pg_addr']}:{nodes[x['node_id']]['listen_pg_port']}"
+          for x in order]
+    stripe = describe()["stripe_size"]
+    opts = json.loads(os.environ.get("NEON_LOCAL_COMPUTE_OPTS") or "{}")
+    os.environ["NEON_LOCAL_COMPUTE_OPTS"] = json.dumps({**opts, "pageservers": ps, "stripe_size": stripe})
+    nl.ensure_compute(tl)
+    nl.compute_sql(tl, "CHECKPOINT")
+    nl.stop_compute(tl)
+    deadline = time.time() + 300
+    for shard, base in urls.items():
+        while True:
+            st, body = nl.http("GET", base)
+            if st == 200 and lsn_int(body["last_record_lsn"]) > image_lsn:
+                break
+            if time.time() > deadline:
+                raise RuntimeError(f"{shard}: timeline did not advance past its image layers")
+            time.sleep(1)
+    return kinds
+
+
+def cmd_compact_shards(_args) -> None:
+    t0 = time.time()
+    kinds = compact_shards()
+    print(f"seed timeline layers per shard after image compaction: {kinds} ({time.time() - t0:.0f}s)")
+
+
 def compact_seed(_args) -> None:
     t0 = time.time()
     kinds = compact_images(nl.seed_timeline())
@@ -251,6 +310,9 @@ def shard_split(args) -> None:
             raise RuntimeError(f"shards not placed: {d['shards']}")
         time.sleep(2)
     pause_tenant(tenant)
+    t1 = time.time()
+    out["compact_shards"] = {"layers": compact_shards(), "seconds": round(time.time() - t1, 1)}
+    print("compact shards:", out["compact_shards"], flush=True)
     out["after"] = locate()
     out["describe"] = describe()
     out["seconds"] = round(time.time() - t0, 1)
@@ -327,6 +389,12 @@ def clock_check(args) -> None:
 
 def smoke(_args) -> None:
     from dblib import result_collector as rc
+    # after a shard split the computes must know the shards (as the workload drivers' compute options do);
+    # without them a compute talks to shard 0 as if unsharded and the pageserver makes it reconnect forever
+    ps_opts = json.loads(os.environ.get("NEON_LOCAL_PS_OPTS") or "{}")
+    if ps_opts:
+        opts = json.loads(os.environ.get("NEON_LOCAL_COMPUTE_OPTS") or "{}")
+        os.environ["NEON_LOCAL_COMPUTE_OPTS"] = json.dumps({**ps_opts, **opts})
     nl.setup_run("smoke")
     s = nl.NeonLocalToolSuite(rc.ResultCollector(), "main")
     print("root stock rows:", s.exec(["SELECT count(*) FROM stock"], refs=["main"])[0].rows)
@@ -360,6 +428,7 @@ def main(argv=None):
     p.add_argument("--pageserver-node", type=int, default=1)
     p.add_argument("--out", required=True)
     sub.add_parser("compact-seed")
+    sub.add_parser("compact-shards")
     p = sub.add_parser("shard-split")
     p.add_argument("--shards", type=int, default=2)
     p.add_argument("--stripe-pages", type=int, default=256)
@@ -378,7 +447,7 @@ def main(argv=None):
     load_env(a.env)
     from dblib import neon_local
     nl = neon_local
-    {"seed": seed, "compact-seed": compact_seed, "shard-split": shard_split, "locate": cmd_locate, "purge": purge,
+    {"seed": seed, "compact-seed": compact_seed, "compact-shards": cmd_compact_shards, "shard-split": shard_split, "locate": cmd_locate, "purge": purge,
      "status": status, "metrics": metrics, "clock-check": clock_check, "smoke": smoke}[a.cmd](a)
 
 

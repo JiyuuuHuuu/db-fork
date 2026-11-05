@@ -1,0 +1,43 @@
+# Experiment 12 test bed: Neon on a0 (hp155) alone, every Postgres-protocol connection over RDMA (RoCE loopback
+# through mlx5_3, 10.10.1.10). For functional tests of the rdma transport while the cluster topology
+# (cloudlab_xl170.toml) runs on all 16 nodes, a0 included: this deployment uses the 4 cores a0's cluster services do
+# not use (6-9 and their siblings 16-19), its own state directory and ports shifted away from the cluster's.
+# Not a measurement setup.
+
+name = "local_a0_rdma"
+state_dir = "/mnt/ssd/bench-a0-rdma"
+
+[nodes.a0]
+host = "local"
+lan = "10.10.1.10"
+public = "128.110.218.194"
+zone = "a"
+disk_dev = "sda4"
+server_cpus = "6-9,16-19"
+
+[neon]
+build_dir = "/mnt/ssd/neon-rdma"         # the rdma branch of the fork
+transport = "rdma"
+client = "a0"
+storcon = "a0"
+broker = "a0"
+seed_compute = "a0"
+pageservers = ["a0"]
+safekeepers = ["a0"]
+compute_agents = ["a0"]
+
+[ports]                                   # the cluster's a0 services hold the defaults
+storcon = 41234
+storcon_pg = 41235
+broker = 45051
+hook = 49999
+ps_http = 49898
+ps_pg = 46400
+sk_pg = 45454
+sk_http = 47676
+agent = 49000
+cpu_agent = 49010
+
+[workload]
+W = 1
+prewarm_heap_blocks = 850

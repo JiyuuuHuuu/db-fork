@@ -32,9 +32,12 @@ Transport (--transport):
        <sock-dir>/c<slot>/.s.PGSQL.<port> (listen_addresses=''), compute_ctl serves its HTTP APIs on
        <sock-dir>/c<slot>/{ext,int}.sock, this agent on --listen unix:<path>; --pageserver and --safekeepers
        name a socket directory and a port (<dir>:<port>, libpq naming).
+  rdma (experiment 12) as tcp, but --pageserver and --safekeepers are rdma:<ip>:<port>: computes reach the
+       pageserver (GetPage, basebackup) and the safekeepers (WAL) over RDMA byte streams.
 The agent runs under the node's server placement (taskset/numactl); compute_ctl and Postgres inherit it.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -156,11 +159,26 @@ def pg_host_of(c):
 
 
 def libpq_url(addr, user="no_user"):
-    """postgres:// URL of host:port; a host that is a directory (a Unix-socket directory) is percent-encoded."""
+    """postgres:// URL of host:port; a host that is a directory (a Unix-socket directory) is percent-encoded.
+    rdma:ip:port (experiment 12) gives rdma://user@ip:port: the same protocol over an RDMA byte stream, which the
+    neon extension (libpagestore.c) and compute_ctl (basebackup) dial."""
+    if addr.startswith("rdma:"):
+        host, port = addr[len("rdma:"):].rsplit(":", 1)
+        return f"rdma://{user}@{host}:{port}"
     host, port = addr.rsplit(":", 1)
     if host.startswith("/"):
         host = urllib.parse.quote(host, safe="")
     return f"postgres://{user}@{host}:{port}"
+
+
+def safekeepers_for(timeline_id):
+    """--safekeepers for one timeline: one list (host:port,...), or groups of them separated by ';' (topology
+    safekeeper_groups, experiment 12): the timeline's WAL goes to the group its id hashes to, so every compute of the
+    timeline (and its restarts) uses the same set."""
+    groups = ARGS.safekeepers.split(";")
+    if len(groups) == 1:
+        return groups[0]
+    return groups[int(hashlib.sha256(timeline_id.encode()).hexdigest(), 16) % len(groups)]
 
 
 def render_config(tenant_id, timeline_id, port, shared_buffers, lfc_mb, compute_dir, sockdir=None, pageservers=None,
@@ -190,7 +208,8 @@ def render_config(tenant_id, timeline_id, port, shared_buffers, lfc_mb, compute_
         spec["shard_stripe_size"] = int(stripe_size)
     spec["pageserver_connstring"] = ",".join(pss)
     spec["safekeepers_generation"] = None     # walproposer then creates the timeline on the safekeeper
-    spec["safekeeper_connstrings"] = ARGS.safekeepers.split(",")
+    sks = safekeepers_for(timeline_id)
+    spec["safekeeper_connstrings"] = sks.split(",")
     spec["mode"] = "Primary"
     spec["endpoint_storage_addr"] = None
     spec["endpoint_storage_token"] = None
@@ -203,7 +222,7 @@ def render_config(tenant_id, timeline_id, port, shared_buffers, lfc_mb, compute_
         conf += "unix_socket_directories=''\n"
     conf = re.sub(r"port=\d+", f"port={port}", conf)
     conf = re.sub(r"shared_buffers=\S+", f"shared_buffers={shared_buffers}", conf)
-    conf = re.sub(r"neon\.safekeepers='[^']*'", f"neon.safekeepers='{ARGS.safekeepers}'", conf)
+    conf = re.sub(r"neon\.safekeepers='[^']*'", f"neon.safekeepers='{sks}'", conf)
     conf = re.sub(r"effective_io_concurrency=\d+", f"effective_io_concurrency={ARGS.eic}", conf)
     conf = re.sub(r"neon\.max_file_cache_size=\S+", f"neon.max_file_cache_size={lfc_mb}MB", conf)
     conf = re.sub(r"neon\.file_cache_size_limit=\S+", f"neon.file_cache_size_limit={lfc_mb}MB", conf)
@@ -731,7 +750,8 @@ def main():
     global ARGS, TEMPLATE, START_SEM, ARCHIVE
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--listen", default="0.0.0.0:9000", help="host:port or unix:/path of this agent")
-    ap.add_argument("--transport", choices=["tcp", "uds"], default="tcp")
+    ap.add_argument("--transport", choices=["tcp", "uds", "rdma"], default="tcp",
+                    help="rdma: as tcp for the agent's own connections; --pageserver/--safekeepers carry rdma: addresses")
     ap.add_argument("--archive-dir", required=True, help="samples.jsonl, starts.jsonl, pg/ (compute logs)")
     ap.add_argument("--sample-interval", type=float, default=1.0)
     ap.add_argument("--sample-max-computes", type=int, default=8,
@@ -748,7 +768,7 @@ def main():
     g.add_argument("--compute-root", default="", help="compute data directories (and LFC files)")
     g.add_argument("--disk-compute-root", default="", help="data directories of computes started with pgdata_on_disk")
     g.add_argument("--pageserver", default="", help="host:port (uds: socket dir:port) of the unsharded pageserver")
-    g.add_argument("--safekeepers", default="", help="host:port,... (uds: socket dir:port)")
+    g.add_argument("--safekeepers", default="", help="host:port,... (uds: socket dir:port); groups separated by ';' (one per timeline)")
     g.add_argument("--shared-buffers", default="1MB")
     g.add_argument("--lfc-mb", type=int, default=0, help="local file cache size per compute (0: off)")
     g.add_argument("--lfc-chunk", type=int, default=128, help="LFC chunk size in pages (Neon's default 128)")

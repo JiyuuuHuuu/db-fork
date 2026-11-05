@@ -1,0 +1,168 @@
+# Read phase (experiment 12, 2 pageservers): the tenant split into 2 shards on a4, a5 (neon.py shard-split --shards 2); one safekeeper set; computes on b4-b7; clients b0-b3 (b0 = topology client, b1-b3 extra, scripts/workloads/multi_client).
+# Derived from cloudlab_xl170.toml: same nodes, addresses, placement and data_root; only the roles differ.
+# 16 xl170 nodes at CloudLab Utah (experiment branchbench, project rasl-PG0; .agent/cloudlab.md,
+# .agent/network-probe-2026-11-02-xl170/nodes.txt). a0-a7 are zone "a" (VLAN 10.10.1.0/24), b0-b7 zone "b"
+# (10.10.2.0/24). The VLANs do not route to each other, so cross-zone traffic uses the public addresses (10 GbE),
+# on which az_netem.sh apply 420 emulates two availability zones (1.01 ms round trip; lost on reboot).
+# Every node: 10 cores / 20 threads, 64 GB, one SATA SSD that is also the root disk; /mnt/ssd (sda4, 375 GB ext4)
+# is already mounted, so ssd_dev stays unset and data_root is explicit. Computes on a 16 GB tmpfs on b1-b7 as in
+# experiment 5; scaling runs put compute data directories on /mnt/ssd (pgdata_on_disk).
+# a0 (hp155) is also the coordinator; it is named by hostname (not "local") so neon.py treats it like every other
+# node (systemd units, prepare, CPU agent). b0 is physically on the a-side switch. Experiment 12, TCP arm.
+
+name = "cloudlab_xl170_read2ps"
+state_dir = "/mnt/ssd/bench-xl170-read2ps"
+
+[ssh]
+user = "JiyuHu23"
+key = "~/.ssh/dassl_rsa"
+
+[nodes.a0]
+host = "hp155.utah.cloudlab.us"
+lan = "10.10.1.10"
+public = "128.110.218.194"
+zone = "a"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+server_cpus = "0-5,10-15"               # Neon services on a0 on 6 of 10 cores: phase-2 builds run on 6-9,16-19
+
+[nodes.a1]
+host = "hp130.utah.cloudlab.us"
+lan = "10.10.1.11"
+public = "128.110.218.169"
+zone = "a"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.a2]
+host = "hp159.utah.cloudlab.us"
+lan = "10.10.1.12"
+public = "128.110.218.198"
+zone = "a"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.a3]
+host = "hp141.utah.cloudlab.us"
+lan = "10.10.1.13"
+public = "128.110.218.180"
+zone = "a"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.a4]
+host = "hp132.utah.cloudlab.us"
+lan = "10.10.1.14"
+public = "128.110.218.171"
+zone = "a"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.a5]
+host = "hp139.utah.cloudlab.us"
+lan = "10.10.1.15"
+public = "128.110.218.178"
+zone = "a"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.a6]
+host = "hp125.utah.cloudlab.us"
+lan = "10.10.1.16"
+public = "128.110.218.164"
+zone = "a"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.a7]
+host = "hp158.utah.cloudlab.us"
+lan = "10.10.1.17"
+public = "128.110.218.197"
+zone = "a"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.b0]
+host = "hp140.utah.cloudlab.us"
+lan = "10.10.2.10"
+public = "128.110.218.179"
+zone = "b"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.b1]
+host = "hp177.utah.cloudlab.us"
+lan = "10.10.2.11"
+public = "128.110.218.216"
+zone = "b"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+tmpfs_size = "16G"
+
+[nodes.b2]
+host = "hp186.utah.cloudlab.us"
+lan = "10.10.2.12"
+public = "128.110.218.225"
+zone = "b"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+tmpfs_size = "16G"
+
+[nodes.b3]
+host = "hp188.utah.cloudlab.us"
+lan = "10.10.2.13"
+public = "128.110.218.227"
+zone = "b"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+tmpfs_size = "16G"
+
+[nodes.b4]
+host = "hp192.utah.cloudlab.us"
+lan = "10.10.2.14"
+public = "128.110.218.231"
+zone = "b"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+tmpfs_size = "16G"
+
+[nodes.b5]
+host = "hp187.utah.cloudlab.us"
+lan = "10.10.2.15"
+public = "128.110.218.226"
+zone = "b"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+tmpfs_size = "16G"
+
+[nodes.b6]
+host = "hp181.utah.cloudlab.us"
+lan = "10.10.2.16"
+public = "128.110.218.220"
+zone = "b"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+tmpfs_size = "16G"
+
+[nodes.b7]
+host = "hp171.utah.cloudlab.us"
+lan = "10.10.2.17"
+public = "128.110.218.210"
+zone = "b"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+tmpfs_size = "16G"
+
+[neon]
+build_dir = "/mnt/ssd/neon-src"          # fork local-uds 4187e2da7 + exp 11 patches
+transport = "tcp"
+client = "b0"
+storcon = "a0"
+broker = "a0"
+seed_compute = "a0"
+pageservers = ["a4", "a5"]
+safekeepers = ["a1", "a2", "a3"]
+compute_agents = ["b4", "b5", "b6", "b7"]
+
+[workload]
+max_procs = 20                           # b0 has 20 hardware threads

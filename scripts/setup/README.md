@@ -25,10 +25,10 @@ A topology is a TOML file. Three examples are in `topologies/`:
 | top level | `name`; `state_dir` (on the coordinator: staged binaries, `code/`, env files, seed records; on a remote client node the same path holds the copied env files) |
 | `[ssh]` | `user`, `key` (CloudLab) |
 | `[nodes.<name>]` | `host` (`"local"` = this machine, no ssh), `lan`, `public`, `zone`; `ssd_dev` (formatted with XFS only if blank, mounted at `data_root`, default `/mnt/ssd`), `tmpfs_size` (computes on `/mnt/tmpfs/computes`), `disk_dev` (disk counters); placement `server_cpus`/`server_mem` (taskset + numactl `--membind`; `2-38:4` is a stride range), or `server_numa`; the same for `client_*` |
-| `[neon]` | `build_dir` (the Neon checkout with built binaries), `transport` (`uds` on one host, `tcp` otherwise), roles `client`, `storcon` (+ its Postgres and the compute-hook stub), `broker`, `seed_compute`, `pageservers` (the first is node id 1; the others join with scheduling Pause and share its remote storage over NFS), `safekeepers`, `compute_agents` (computes placed round-robin); optional `ps_page_cache_size` |
+| `[neon]` | `build_dir` (the Neon checkout with built binaries), `transport` (`uds` on one host, `tcp` otherwise, `rdma` for RDMA byte streams between the services, experiment 12), roles `client`, `storcon` (+ its Postgres and the compute-hook stub), `broker`, `seed_compute`, `pageservers` (the first is node id 1; the others join with scheduling Pause and share its remote storage over NFS), `safekeepers`, `compute_agents` (computes placed round-robin); optional `ps_page_cache_size` |
 | `[doltgres]` | `version` (1.4.0), `server`, `client`, optional `user`/`password` |
 | `[ports]` | experiment 5's ports by default (storcon 1234, pageserver 9898/64000, safekeeper 7676/5454, agent 9000, CPU agent 9010, Doltgres 5433, ...) |
-| `[workload]`, `[neon.workload]`, `[doltgres.workload]` | workload parameters. The defaults are experiment 5's (`WORKLOAD_DEFAULTS` in `topo.py`); the backend sections override `[workload]` |
+| `[workload]`, `[neon.workload]`, `[doltgres.workload]` | workload parameters. The defaults are experiment 5's with experiment 8's dataset: W = 3, prewarm 3,674 heap pages, so the 36 MB LFC holds 28% of the stock heap (`WORKLOAD_DEFAULTS` in `topo.py`); the backend sections override `[workload]` |
 
 **Addresses.** A role is reached:
 - on a Unix socket (Neon `uds`) or on loopback, when it is on the same host as the caller;

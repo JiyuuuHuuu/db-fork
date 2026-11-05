@@ -1,0 +1,73 @@
+# 16 xl170 nodes at CloudLab Utah (experiment branchbench, project rasl-PG0; .agent/cloudlab.md,
+# .agent/network-probe-2026-11-02-xl170/nodes.txt). a0-a7 are zone "a" (VLAN 10.10.1.0/24), b0-b7 zone "b"
+# (10.10.2.0/24). The VLANs do not route to each other, so cross-zone traffic uses the public addresses (10 GbE),
+# on which az_netem.sh apply 420 emulates two availability zones (1.01 ms round trip; lost on reboot).
+# Every node: 10 cores / 20 threads, 64 GB, one SATA SSD that is also the root disk; /mnt/ssd (sda4, 375 GB ext4)
+# is already mounted, so ssd_dev stays unset and data_root is explicit. Computes on a 16 GB tmpfs on b1-b7 as in
+# experiment 5; scaling runs put compute data directories on /mnt/ssd (pgdata_on_disk).
+# a0 (hp155) is also the coordinator; it is named by hostname (not "local") so neon.py treats it like every other
+# node (systemd units, prepare, CPU agent). b0 is physically on the a-side switch. Experiment 12, TCP arm: five-node smoke of the setup paths.
+
+name = "cloudlab_xl170_mini"
+state_dir = "/mnt/ssd/bench-mini"
+
+[ssh]
+user = "JiyuHu23"
+key = "~/.ssh/dassl_rsa"
+
+[nodes.a0]
+host = "hp155.utah.cloudlab.us"
+lan = "10.10.1.10"
+public = "128.110.218.194"
+zone = "a"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.a4]
+host = "hp132.utah.cloudlab.us"
+lan = "10.10.1.14"
+public = "128.110.218.171"
+zone = "a"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.a5]
+host = "hp139.utah.cloudlab.us"
+lan = "10.10.1.15"
+public = "128.110.218.178"
+zone = "a"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.b0]
+host = "hp140.utah.cloudlab.us"
+lan = "10.10.2.10"
+public = "128.110.218.179"
+zone = "b"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+
+[nodes.b1]
+host = "hp177.utah.cloudlab.us"
+lan = "10.10.2.11"
+public = "128.110.218.216"
+zone = "b"
+data_root = "/mnt/ssd"
+disk_dev = "sda4"
+tmpfs_size = "16G"
+
+[neon]
+build_dir = "/mnt/ssd/neon-src"          # fork local-uds 4187e2da7 + exp 11 patches
+transport = "tcp"
+client = "b0"
+storcon = "a0"
+broker = "a0"
+seed_compute = "a0"
+pageservers = ["a4", "a5"]
+safekeepers = ["a0"]
+compute_agents = ["b1"]
+
+[workload]
+max_procs = 20                           # b0 has 20 hardware threads
+W = 1                                    # the mini tenant is seeded with --scale 1
+prewarm_heap_blocks = 850

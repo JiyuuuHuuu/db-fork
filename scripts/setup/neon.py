@@ -67,17 +67,18 @@ SVC_FILES = ("neon_node_agent.py", "compute_config_template.json", "compute_hook
 
 # Constants of the sources (override in [neon] where a key is named)
 PS_PAGE_CACHE_PAGES = {"uds": 131072,   # 1 GiB (exp 10/11: preallocated; holds layer index blocks only, since
-                       "tcp": 1048576}  # GetPage reads use direct I/O); 8 GiB (exp 5). [neon] ps_page_cache_size
+                       "tcp": 1048576,  # GetPage reads use direct I/O); 8 GiB (exp 5). [neon] ps_page_cache_size
+                       "rdma": 1048576}  # as tcp: the rdma arm of experiment 12 differs only in the transport
 STORCON_PG_MAX_CONNECTIONS = 300
 SHMMNI = 32768                 # one SysV segment per compute; killed computes leave theirs (agent removes them)
 LOCAL_DISK_GUARD_GB = 40       # exp 11: the agent refuses a compute start with less free space on the compute root
-SAMPLE_MAX_COMPUTES = {"uds": 0, "tcp": 8}   # computes queried per sampler tick (exp 11: none, it costs server CPU)
+SAMPLE_MAX_COMPUTES = {"uds": 0, "tcp": 8, "rdma": 8}   # computes queried per sampler tick (exp 11: none, it costs server CPU)
 SAMPLE_INTERVAL_S = 1
 FANOUT_PORT = 8765             # compute binaries fanned out within a zone over HTTP (exp 5: across the WAN once)
 EXPORT_OPTS = "rw,sync,no_subtree_check,no_root_squash"
 NFS_OPTS = "rw,hard,noatime,vers=4.2"
 REMOTE_REPO = "~/db-fork"
-APT_PACKAGES = ("rsync", "curl")
+APT_PACKAGES = ("rsync", "curl", "libpq5")   # libpq5: the pageserver binary links libpq.so.5
 
 
 def q(s) -> str:
@@ -415,7 +416,9 @@ class Neon:
 
         # storage broker
         b = self.broker
-        self.launch(b, "broker", [f"{self.bin(b)}/storage_broker", f"--listen-addr={t.listen('broker', 'broker')}"])
+        # under rdma the broker's only clients are the safekeepers and pageservers: it listens on RDMA alone
+        broker_listen = t.rdma_listen("broker") if t.rdma else t.listen("broker", "broker")
+        self.launch(b, "broker", [f"{self.bin(b)}/storage_broker", f"--listen-addr={broker_listen}"])
 
         # Postgres of the storage controller (neon_rmgr: it must replay Neon's own WAL records after a crash)
         sc, sbin = self.sc, self.bin(self.sc)
@@ -441,6 +444,7 @@ class Neon:
         self.launch(sc, "hook", ["python3", f"{self.d(sc, 'svc')}/compute_hook_stub.py",
                                  "--listen", t.listen("hook", "hook")])
         self.launch(sc, "storcon", [f"{sbin}/storage_controller", "--dev", "--listen", t.listen("storcon", "storcon"),
+                                    *(["--listen-rdma", t.rdma_listen("storcon")] if t.rdma else []),
                                     "--database-url", db_url,
                                     "--tenant-rate-limit", str(self.w["storcon_rate_limit"]),
                                     "--control-plane-url", t.http_url("hook", "hook", sc, sc)])
@@ -451,10 +455,13 @@ class Neon:
             sk, skr = self.d(n, "sk"), self.d(n, "sk-remote")
             self.r.run(n, f"mkdir -p {sk} {skr}")
             adv = f"{self.run_dir}:{P['sk_pg']}" if self.uds else f"{self.sk_advertise(n)}:{P['sk_pg']}"
+            if self.t.rdma:   # the pageservers pull WAL over RDMA (published through the broker as is)
+                adv = f"rdma:{adv}"
             self.launch(n, "safekeeper", [
                 f"{self.bin(n)}/safekeeper", "-D", sk, f"--id={k}", f"--listen-pg={t.listen('sk', 'sk_pg', 'pg')}",
                 f"--advertise-pg={adv}", f"--listen-http={t.listen('sk-http', 'sk_http')}",
-                f"--broker-endpoint={t.http_url('broker', 'broker', self.broker, n)}",
+                *([f"--listen-http-rdma={t.rdma_listen('sk_http')}"] if t.rdma else []),
+                f"--broker-endpoint={t.svc_url('broker', 'broker', self.broker, n)}",
                 f"--availability-zone=az{k}", f'--remote-storage={{local_path="{skr}"}}'])
 
         # pageservers: one remote storage for all (NFS), then config, identity (id = position) and start
@@ -466,9 +473,10 @@ class Neon:
             self.r.put(n, f"{ps}/pageserver.toml", f"""\
 listen_pg_addr    = "{t.listen('ps', 'ps_pg', 'pg')}"
 listen_http_addr  = "{t.listen('ps-http', 'ps_http')}"
+{f'listen_http_rdma_addr = "{t.rdma_listen("ps_http")}"' if t.rdma else ''}
 pg_distrib_dir    = "{self.bin(n)}/pg_install"
-broker_endpoint   = "{t.http_url('broker', 'broker', self.broker, n)}"
-control_plane_api = "{t.http_url('storcon', 'storcon', sc, n, '/upcall/v1/')}"
+broker_endpoint   = "{t.svc_url('broker', 'broker', self.broker, n)}"
+control_plane_api = "{t.svc_url('storcon', 'storcon', sc, n, '/upcall/v1/')}"
 availability_zone = "{n.zone}"
 remote_storage = {{ local_path = "{psr}" }}
 max_file_descriptors = 65536
@@ -511,6 +519,8 @@ disk_usage_based_eviction = {{ enabled = false }}
                 pg_addr, http_addr = self.run_dir, f"unix:{self.t.sock('ps-http')}"
             else:
                 pg_addr = http_addr = n.addr_from(sc)
+                if self.t.rdma:   # the storage controller calls the pageserver's API over RDMA (http+rdma)
+                    http_addr = "rdma:" + self.t.rdma_host(n, sc)
             body = {"node_id": k, "listen_pg_addr": pg_addr, "listen_pg_port": P["ps_pg"], "listen_grpc_addr": None,
                     "listen_grpc_port": None, "listen_http_addr": http_addr, "listen_http_port": P["ps_http"],
                     "listen_https_port": None, "availability_zone_id": n.zone, "node_ip_addr": None}
@@ -606,8 +616,10 @@ disk_usage_based_eviction = {{ enabled = false }}
                      "--safekeepers", f"{self.run_dir}:{P['sk_pg']}"]
         else:
             argv += ["--host", self.compute_host(node),
-                     "--pageserver", f"{self.pss[0].addr_from(node)}:{P['ps_pg']}",
-                     "--safekeepers", ",".join(f"{s.addr_from(node)}:{P['sk_pg']}" for s in self.sks)]
+                     "--pageserver", f"{self.t.pg_host(self.pss[0], node)}:{P['ps_pg']}",
+                     # groups (safekeeper_groups > 1) separated by ';': the agent picks one per timeline
+                     "--safekeepers", ";".join(",".join(f"{self.t.pg_host(self.t.node(s), node)}:{P['sk_pg']}"
+                                                        for s in grp) for grp in self.t.safekeeper_groups())]
         if node.name in self.n["compute_agents"]:
             argv += ["--shared-buffers", w["shared_buffers"], "--lfc-mb", str(w["lfc_mb"])]
         else:   # seeding-only node: big shared buffers, no LFC, no statement log (exp 4: gigabytes of log)
@@ -739,6 +751,10 @@ disk_usage_based_eviction = {{ enabled = false }}
             mnt = self.d(n, "ps-remote")
             self.r.run(n, f"if mountpoint -q {mnt}; then sudo -n umount {mnt}; fi; "
                           f"sudo -n sed -i '\\| {mnt} nfs |d' /etc/fstab", check=False)
+        if len(self.pss) > 1:       # and the export: a stale line for a deleted directory fails every later exportfs
+            path = self.d(self.pss[0], "ps-remote")
+            self.r.run(self.pss[0], f"sudo -n sed -i '\\|^{path} |d' /etc/exports && sudo -n exportfs -ra",
+                       check=False)
         for n in self.server_nodes():
             r = self.roles(n)
             dirs = []
@@ -841,7 +857,7 @@ disk_usage_based_eviction = {{ enabled = false }}
             log("warning: compute agents see the pageservers on different addresses; ps_opts uses the first "
                 "agent's view")
         viewer = self.t.node(self.n["compute_agents"][0])
-        seed["ps_opts"] = {"pageservers": [f"{self.pss[s['node_id'] - 1].addr_from(viewer)}:{self.t.ports['ps_pg']}"
+        seed["ps_opts"] = {"pageservers": [f"{self.t.pg_host(self.pss[s['node_id'] - 1], viewer)}:{self.t.ports['ps_pg']}"
                                            for s in shards_after],
                            "stripe_size": split["after"]["shard_params"]["stripe_size"]}
         seed["shard_split"] = {"shards": shards, "stripe_pages": stripe, "seconds": split.get("seconds"),

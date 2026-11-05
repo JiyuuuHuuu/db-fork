@@ -1,13 +1,49 @@
 # CloudLab specs
 
 ```
-ssh JiyuHu23@c220g1-030806.wisc.cloudlab.us
-ssh JiyuHu23@c220g1-030814.wisc.cloudlab.us
-ssh JiyuHu23@c220g2-011308.wisc.cloudlab.us
-ssh JiyuHu23@c220g2-011313.wisc.cloudlab.us
+ssh JiyuHu23@hp155.utah.cloudlab.us
+ssh JiyuHu23@hp130.utah.cloudlab.us
+ssh JiyuHu23@hp159.utah.cloudlab.us
+ssh JiyuHu23@hp141.utah.cloudlab.us
+ssh JiyuHu23@hp132.utah.cloudlab.us
+ssh JiyuHu23@hp139.utah.cloudlab.us
+ssh JiyuHu23@hp125.utah.cloudlab.us
+ssh JiyuHu23@hp158.utah.cloudlab.us
+ssh JiyuHu23@hp140.utah.cloudlab.us
+ssh JiyuHu23@hp177.utah.cloudlab.us
+ssh JiyuHu23@hp186.utah.cloudlab.us
+ssh JiyuHu23@hp188.utah.cloudlab.us
+ssh JiyuHu23@hp192.utah.cloudlab.us
+ssh JiyuHu23@hp187.utah.cloudlab.us
+ssh JiyuHu23@hp181.utah.cloudlab.us
+ssh JiyuHu23@hp171.utah.cloudlab.us
 ```
 
-## Current cluster (from 22 Oct 2026): two zones
+## Current cluster (from 2 Nov 2026): 16 xl170 at Utah, two zones
+
+Experiment `branchbench`, project `rasl-PG0`, CloudLab Utah. Login list above (`ssh -i ~/.ssh/dassl_rsa
+JiyuHu23@hpNNN.utah.cloudlab.us`); passwordless sudo. Details, raw data and scripts:
+`network-probe-2026-11-02-xl170/` (README there). Sessions on this cluster run from hp155 (= a0).
+
+| Nodes | Hosts | LAN (25 GbE, `ens1f1np1`, `mlx5_3`) | Public (10 GbE, `eno49np0`, `mlx5_0`) |
+|---|---|---|---|
+| a0-a7 | hp155 hp130 hp159 hp141 hp132 hp139 hp125 hp158 | 10.10.1.10-17 | see `nodes.txt` |
+| b0-b7 | hp140 hp177 hp186 hp188 hp192 hp187 hp181 hp171 | 10.10.2.10-17 | see `nodes.txt` |
+
+- All 16 identical: 1x Xeon E5-2640 v4 (10 cores / 20 threads, 1 NUMA node), 64 GB, one 447 GB SATA SSD;
+  ConnectX-4 Lx NICs; Ubuntu 22.04.2, kernel 5.15.0-198. b7 exposes no cpufreq driver.
+- Disk: root `/dev/sda3` is 63 GB; `/dev/sda4` (375 GB ext4) is mounted at **`/mnt/ssd`** on every node (fstab,
+  `nofail`, owned by JiyuHu23). Put database data there.
+- Installed everywhere: rdma-core, ibverbs-utils, perftest, iperf3, fio, numactl.
+- The two LANs do not route to each other; cross-zone traffic must use the public IPs (one L2 segment, 1 hop).
+- Physical switches: {a0-a7, b0} and {b1-b7}. Crossing them adds ~1 us of RDMA latency (1.65 -> 2.8 us).
+- **Emulated AZs, active since 2 Nov 2026:** `network-probe-2026-11-02-xl170/scripts/az_netem.sh apply 420`
+  delays packets to the other zone's public IPs by 420 us on `eno49np0`: cross-zone RTT 1.01 ms (ping), same zone
+  0.07-0.12 ms. Not persistent across reboots (`az_netem.sh status` to check). Does **not** delay RDMA (RoCE).
+- Throughput: same zone LAN 13-15 Gbit/s one TCP stream, 23.3 with 4; cross zone 9.4 without delay, 7.1-7.4 one
+  stream / 9.3 with 4 streams at 1 ms. RDMA write 22 Gbit/s on the LAN, 8.8 Gbit/s on the public network.
+
+## Two-zone cluster c220g2 + r320 (from 22 Oct 2026)
 
 Profile `branchDB` in project `rasl-PG0`. Sixteen nodes in two groups with no routers between them. Group A is 8
 c220g2 nodes at CloudLab Wisconsin, group B is 8 r320 nodes at the APT cluster (Utah). Traffic within a group
