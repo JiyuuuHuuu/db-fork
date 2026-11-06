@@ -65,7 +65,9 @@ n0-n15 = node0-node15). Every node: PGDG PostgreSQL 17.11 (no default cluster), 
 `/mydata/pgcopy/{svc,instances,archive}`, results under `/mydata/exp13`; cluster-internal ssh key
 `~/.ssh/cluster_ed25519` (+ `~/.ssh/config` for 10.10.1.*). n0 holds the seed instance (`seed`, port 24000, W=3),
 n1-n15 are hosts (n1 also runs the drivers). **Trim the SSDs** (`sudo fstrim /mydata`): without it they slowed after a
-few hundred GB of copies; the agents now trim after every purge. n4 (hp091) is the slowest node under load.
+few hundred GB of copies; the agents now trim after every purge. n4 (hp091) has faulty memory: ~1 GiB/s of copy bandwidth (`dd if=/dev/zero of=/dev/null bs=64M
+count=32`) against 6.4-7.2 GiB/s on the other 15 nodes, normal CPU speed, no EDAC errors (checked 5 Nov 2026 after
+experiment 13); it falls 2-4x behind under load. Leave it out or ask CloudLab to replace it.
 
 State after experiment 13 (5 Nov 2026, 13:30 UTC): agents running, only `seed` left (on n0); `/mydata/exp13` on every
 node holds that node's results (the coordinator has all of them under `/mydata/exp13`). Cleanup:

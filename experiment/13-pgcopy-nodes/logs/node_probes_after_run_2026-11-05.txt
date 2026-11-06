@@ -1,0 +1,50 @@
+Node probes after the run, 5 Nov 2026 ~15:00-15:30 UTC, cluster idle (agents up, only the seed instance on n0).
+Scripts were run from the coordinator over ssh (bash -s); the commands are reproduced below.
+
+== 1. CPU under full load (n1 hp119, n2 hp011, n4 hp091 at the same time)
+openssl speed -multi 20 -seconds 15 sha256; MHz averaged over /proc/cpuinfo at 10 s; thermal_throttle counts
+node2 MHz@10s=2594 hwmon_temps=38000  throttle_counts(pkg core)=0 0
+sha256          357764.93k   950861.34k  2134580.86k  3002584.27k  3395294.55k  3430831.45k
+node4 MHz@10s=2594 hwmon_temps=40000  throttle_counts(pkg core)=0 0
+sha256          357636.74k   950920.00k  2134585.58k  3002244.44k  3393363.97k  3428761.60k
+node1 MHz@10s=2594 hwmon_temps=38000  throttle_counts(pkg core)=0 0
+sha256          357592.72k   950930.67k  2134713.60k  3002226.28k  3394059.74k  3430360.68k
+n2 and n4: governor schedutil, E5-2640 v4, 4 x 16 GB DIMMs at 2133 MT/s configured, EDAC ce/ue 0/0.
+
+== 2. Memory copy bandwidth, all 16 nodes
+dd if=/dev/zero of=/dev/null bs=64M count=32, one stream and four at once (GiB/s total)
+node0 x1 7.1 x4 18.5    node1 x1 7.2 x4 18.4    node2 x1 7.1 x4 18.7    node3 x1 7.1 x4 18.6
+node4 x1 1.0 x4 0.9     node5 x1 7.0 x4 18.7    node6 x1 6.7 x4 17.7    node7 x1 7.1 x4 18.6
+node8 x1 7.1 x4 18.8    node9 x1 6.7 x4 17.8    node10 x1 7.1 x4 18.6   node11 x1 7.1 x4 18.7
+node12 x1 7.0 x4 18.7   node13 x1 6.4 x4 17.3   node14 x1 7.0 x4 18.7   node15 x1 7.1 x4 18.7
+Same with 4 MB blocks (fits in cache), pinned per CPU: n2 and n4 both 14.4-17.4 GiB/s on every CPU; in parallel
+(2 GiB each) n2 x2 31.1, x5 65.8, x10 23.7, x20 21.5 GiB/s; n4 x2 31.4, x5 20.3, x10 0.9, x20 1.3 GiB/s.
+-> n4's DRAM bandwidth is ~7-20x below the other nodes'.
+
+== 3. One node's point-read capacity (n0 hp024, the seed instance: PostgreSQL 17.11, shared_buffers 1 GB, warm)
+pgbench -h 127.0.0.1 -p 24000 -U bench -n -c C -j C -T 8 bench, script:
+  \set w random(1, 3) / \set i random(1, 100000) / <query>
+busy hardware threads from /proc/stat over the run (client, server and kernel together)
+
+a) -M prepared, SELECT s_quantity FROM stock WHERE s_w_id = :w AND s_i_id = :i
+clients   1:   20939 reads/s  busy hw threads  1.1/20  ->    54 us hw-thread time per read
+clients   5:  106989 reads/s  busy hw threads  5.6/20  ->    52 us hw-thread time per read
+clients  10:  181359 reads/s  busy hw threads 11.4/20  ->    63 us hw-thread time per read
+clients  15:  238639 reads/s  busy hw threads 15.7/20  ->    66 us hw-thread time per read
+clients  17:  265229 reads/s  busy hw threads 17.4/20  ->    66 us hw-thread time per read
+clients  20:  303953 reads/s  busy hw threads 19.9/20  ->    66 us hw-thread time per read
+clients  30:  293095 reads/s  busy hw threads 19.9/20  ->    68 us hw-thread time per read
+clients  40:  284146 reads/s  busy hw threads 19.9/20  ->    70 us hw-thread time per read
+clients  68:  281870 reads/s  busy hw threads 19.9/20  ->    71 us hw-thread time per read
+
+b) -M simple, SELECT * FROM stock WHERE s_w_id = :w AND s_i_id = :i   (the runner's and ceiling_check's query shape)
+clients   1:   10841 reads/s  busy  1.1/20  ->   99 us per read
+clients  10:   81043 reads/s  busy 10.8/20  ->  133 us per read
+clients  17:  118061 reads/s  busy 17.2/20  ->  146 us per read
+clients  20:  131412 reads/s  busy 19.9/20  ->  152 us per read
+clients  40:  128388 reads/s  busy 19.9/20  ->  155 us per read
+
+For comparison, experiment 13's median node (scaling_data READ, runner with fast_client, 17 instances with 40 MB
+shared_buffers): N = 256 (17 clients/node) 37.9k reads/s at 14.4 busy threads = 380 us per read (client 266,
+postgres 98); N = 512: 475 us; N = 1,024: 511 us. Ceiling check (Python asyncio client) N = 512: ~46k/node at 19.7
+busy threads = ~430 us per read.

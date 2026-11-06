@@ -98,6 +98,10 @@ Also superseded: the smoke attempt whose multi-node branch point waited for two 
 one (`data/smoke/pgcopy/scaling_branch.hung_go_count/`), and the failed ceiling attempt
 (`data/run/pgcopy/scaling_data/superseded/ceiling_wal_removed/`).
 
+Found after the run: n4 (hp091) has faulty memory (about 1 GiB/s of copy bandwidth against 6.4-7.2 GiB/s on the
+other nodes; report, "Scaling"). Because it stretched the multi-node points' longest window, the scaling figure and
+tables report the sum of the nodes' own rates, not experiment 12's all-operations-over-the-longest-window number.
+
 Not done from the plan: `scripts/plotting/*` colour maps were not given `pgcopy` (they have no `neon_local` either;
 this experiment's figures come from its own `plot.py`). The palette validator of the dataviz guidance needs `node`,
 which the coordinator lacks; the figures use the reference palette's slots 1-4 in fixed order unchanged.
@@ -113,7 +117,8 @@ results/  aggregated data, in git (scripts/collect_results.py from data/): every
 code/     base_commit.txt, shared_code.patch
 scripts/  launch.sh (detached unit on a node), chain.sh (setup | smoke | full | pull), pull.sh, plot.py,
           fork_phases.py, collect_results.py
-logs/     the network probe (summary; raw/ not in git), clock offsets, status snapshots; install, start, seed,
+logs/     the network probe (summary; raw/ not in git), clock offsets, status snapshots, node probes after the
+          run (CPU, memory bandwidth, pgbench point-read capacity); install, start, seed,
           deploy, smoke logs (*.log, not in git)
 data ->   /mydata/exp13 on the coordinator, raw, not in git (62 GB): run/ (full run), smoke/ (smoke ladder),
           archive/<node>/ (agents' forks/failures/trims.jsonl, kept statement logs), nodes/<node>/ (each host's own

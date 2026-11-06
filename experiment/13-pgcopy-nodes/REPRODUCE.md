@@ -89,9 +89,10 @@ too); agent archives stay in `/mydata/pgcopy/archive` on every node until delete
 - Background rows: with many fast background clients the runner's in-memory rows exhaust a node; pgcopy's
   scaling_branch runs record 1 background operation in 20 (`BENCH_BG_SAMPLE`, fast_client); multiply background
   counts by 20 (multi_scaling.py does for its merged summaries).
-- One slow node sets a multi-node point's window (merged throughput = all ops / longest window). Here n4 (hp091) was
-  the slowest at every N >= 256 (up to 4x the others' window at N = 1,024); `figures/scaling.csv` also gives the sum
-  of per-node rates.
+- Check every node's memory bandwidth before a run: n4 (hp091) had about 1 GiB/s against 6.4-7.2 GiB/s on the
+  others (`dd if=/dev/zero of=/dev/null bs=64M count=32`, one and four at once) and fell 2-4x behind at high N. Replace
+  such a node. Multi-node throughput is the sum of the nodes' own rates (`figures/scaling.csv` `throughput`); the
+  shared driver's merged number (all ops / the longest window, `throughput_slowest_window`) follows the slowest node.
 
 - The coordinator never reaches the agents (LAN only); every agent-facing command runs on a node over ssh
   (`pgcopy_ctl.py`). A command that should talk to agents and is run on the coordinator must go through `pgcopy.py`.

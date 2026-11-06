@@ -4,7 +4,7 @@
     uv run python experiment/13-pgcopy-nodes/scripts/plot.py [--run data/run] [--figures figures]
 
 figures/low_load.{png,csv}       one busy branch, one client: p50 / p95 per data op; branch create (copy + start)
-figures/scaling.{png,csv}        busy branches spread over the 15 hosts: throughput and p50 per op vs N
+figures/scaling.{png,csv}        busy branches spread over the 15 hosts: throughput (sum of per-node rates) and p50
 figures/ceiling.{png,csv}        the minimal asyncio client (ceiling_check) vs the runner, per op and N
 figures/branch_create.{png,csv}  create latency (BRANCH rows) vs busy branches: spread over 15 hosts and on one host
 figures/cold_start.{png,csv}     point-read latency on a fresh branch, rolling median per run
@@ -126,8 +126,12 @@ def scaling(run: Path, out: Path):
             rc = s.get("remote_cpu") or {}
             mc = (s.get("multi_client") or {}).get("nodes") or []
             slow = max(mc, key=lambda x: x["elapsed_time"]) if mc else None
-            rows.append({"op": op, "n": s["num_threads"], "throughput": s["throughput"],
-                         "sum_node_throughput": sum(x["throughput"] for x in mc) if mc else s["throughput"],
+            # throughput = sum of each node's own rate (all nodes start together; a slow node does not stretch
+            # the others' windows). throughput_slowest_window = all ops / the longest node window, the shared
+            # driver's merged number: one faulty node (n4, README) drags it down, so it is kept only for reference.
+            rows.append({"op": op, "n": s["num_threads"],
+                         "throughput": sum(x["throughput"] for x in mc) if mc else s["throughput"],
+                         "throughput_slowest_window": s["throughput"],
                          "slowest_node": slow["node"] if slow else None,
                          "window_s": s.get("elapsed_time"),
                          "median_node_window_s": float(np.median([x["elapsed_time"] for x in mc])) if mc else None,
@@ -146,13 +150,12 @@ def scaling(run: Path, out: Path):
     for i, op in enumerate(OPS):
         d = df[df.op == op]
         line(axes[0], d.n, d.throughput / 1e3, i, op)
-        axes[0].plot(d.n, d.sum_node_throughput / 1e3, color=SERIES[i], linestyle=":", linewidth=1.5)
         line(axes[1], d.n, d.p50_ms, i, op)
     for ax in axes:
         nticks(ax, df.n)
         ax.set_xlabel("busy branches N (spread over the hosts)")
     axes[0].set_ylabel("throughput (k statements/s)")
-    axes[0].set_title("Throughput (dotted: sum of per-node rates)")
+    axes[0].set_title("Throughput (sum of per-node rates)")
     axes[1].set_ylabel("p50 latency (ms)")
     axes[1].set_title("Latency")
     axes[0].legend(loc="upper left")
